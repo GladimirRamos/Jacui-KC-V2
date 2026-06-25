@@ -231,22 +231,52 @@ void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
 // Blynk callbacks
 // =====================================================
 
-int BotaoRESET = 0;
+// Enumeração para identificar os botões controlados
+enum TipoBotao { BTN_MANUAL, BTN_AGENDA, BTN_RESET, BTN_LIGA, BTN_DESLIGA, BTN_COUNT };
 
-BLYNK_WRITE(V39)
-{
-  BotaoRESET = param.asInt();
+// Estrutura para gerenciar o temporizador de cada botão
+struct ControleBotao {
+    uint8_t virtualPin;
+    unsigned long tempoInicio;
+    bool aguardando;
+    int valorAtual;
+};
 
-  if (BotaoRESET == 1) {
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gCmd.requestSetRTC = true;
-      gCmd.requestRestart = true;
-      xSemaphoreGive(mtxData);
+// Inicializa a matriz com os pinos virtuais correspondentes
+ControleBotao botoes[BTN_COUNT] = {
+    {27, 0, false, 0}, // BTN_MANUAL
+    {28, 0, false, 0}, // BTN_AGENDA
+    {39, 0, false, 0}, // BTN_RESET
+    {41, 0, false, 0}, // BTN_LIGA
+    {42, 0, false, 0}  // BTN_DESLIGA
+};
+
+// Função auxiliar para iniciar a contagem do botão
+void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
+    botoes[tipo].valorAtual = valor;
+    if (valor == 1) {
+        botoes[tipo].tempoInicio = millis();
+        botoes[tipo].aguardando = true;
+        queueLogf("Botao V%d ativo. Aguardando 5 segundos para confirmar...", botoes[tipo].virtualPin);
+    } else {
+        if (botoes[tipo].aguardando) {
+            queueLogf("Comando V%d cancelado (botao solto antes dos 5s)", botoes[tipo].virtualPin);
+        }
+        botoes[tipo].aguardando = false;
     }
-
-    queueLogf("APP solicitou calibracao RTC e RESET");
-  }
 }
+
+//int BotaoRESET = 0; // Mantido caso use em outro local do escopo
+
+BLYNK_WRITE(V27) { gerenciarCallbackBotao(BTN_MANUAL, param.asInt()); }
+BLYNK_WRITE(V28) { gerenciarCallbackBotao(BTN_AGENDA, param.asInt()); }
+BLYNK_WRITE(V39) { 
+    //BotaoRESET = param.asInt();
+    gerenciarCallbackBotao(BTN_RESET, param.asInt()); 
+}
+BLYNK_WRITE(V41) { gerenciarCallbackBotao(BTN_LIGA, param.asInt()); }
+BLYNK_WRITE(V42) { gerenciarCallbackBotao(BTN_DESLIGA, param.asInt()); }
+
 
 BLYNK_WRITE(V40)
 {
@@ -270,60 +300,6 @@ BLYNK_WRITE(V40)
             (unsigned long)ligaSec,
             (unsigned long)desligaSec,
             dias.c_str());
-}
-
-BLYNK_WRITE(V41)
-{
-  if (param.asInt() == 1) {
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gCmd.forcaLiga = true;
-      xSemaphoreGive(mtxData);
-    }
-
-    queueLogf("Comando LIGAR recebido do APP");
-  }
-}
-
-BLYNK_WRITE(V42)
-{
-  if (param.asInt() == 1) {
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gCmd.forcaDesliga = true;
-      xSemaphoreGive(mtxData);
-    }
-
-    queueLogf("Comando DESLIGAR recebido do APP");
-  }
-}
-
-BLYNK_WRITE(V27)
-{
-  if (param.asInt() == 1) {
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gSchedule.remotoOuAgenda = 0;
-      cicloON = 0;
-      cicloOFF = 0;
-      xSemaphoreGive(mtxData);
-    }
-
-    saveModoToNVS();
-    queueLogf("Modo MANUAL APP recebido");
-  }
-}
-
-BLYNK_WRITE(V28)
-{
-  if (param.asInt() == 1) {
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gSchedule.remotoOuAgenda = 1;
-      cicloON = 0;
-      cicloOFF = 0;
-      xSemaphoreGive(mtxData);
-    }
-
-    saveModoToNVS();
-    queueLogf("Modo AGENDA recebido");
-  }
 }
 
 BLYNK_WRITE(V55)
@@ -535,10 +511,75 @@ void TaskBlynk(void *pv)
 
     uint32_t now = millis();
 
-    // Envia logs da fila para o Blynk
+// --- VERIFICAÇÃO DOS BOTÕES POR 5 SEGUNDOS ---
+        for (int i = 0; i < BTN_COUNT; i++) {
+            if (botoes[i].aguardando && (now - botoes[i].tempoInicio >= 5000)) {
+                botoes[i].aguardando = false; // Reseta o estado para não repetir
+                
+                // Tenta pegar o Mutex para salvar as alterações com segurança
+                if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    switch (i) {
+                        case BTN_MANUAL:
+                            gSchedule.remotoOuAgenda = 0;
+                            cicloON = 0; cicloOFF = 0;
+                            xSemaphoreGive(mtxData);
+                            saveModoToNVS();
+                            queueLogf("Modo MANUAL APP");
+                            break;
+
+                        case BTN_AGENDA:
+                            gSchedule.remotoOuAgenda = 1;
+                            cicloON = 0; cicloOFF = 0;
+                            xSemaphoreGive(mtxData);
+                            saveModoToNVS();
+                            queueLogf("Modo AGENDA");
+                            break;
+
+                        case BTN_RESET:
+                            gCmd.requestSetRTC = true;
+                            gCmd.requestRestart = true;
+                            xSemaphoreGive(mtxData);
+                            queueLogf("RESET e Calibracao RTC");
+                            break;
+
+                        case BTN_LIGA:
+                            gCmd.forcaLiga = true;
+                            xSemaphoreGive(mtxData);
+                            queueLogf("Comando LIGAR");
+                            break;
+
+                        case BTN_DESLIGA:
+                            gCmd.forcaDesliga = true;
+                            xSemaphoreGive(mtxData);
+                            queueLogf("Comando DESLIGAR");
+                            break;
+                    }
+                } else {
+                    ESP_LOGW(TAG_BLYNK, "Timeout ao tentar aplicar comando do botao V%d", botoes[i].virtualPin);
+                }
+            }
+        }
+
+    // Envia logs da fila para o Blynk adicionando Data e Hora
     while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
-      Blynk.virtualWrite(V45, logMsg.text);
-    }
+            char logComTimestamp[150]; // Buffer para armazenar o log final com o tempo
+            
+            // Captura o tempo atual do sistema (usando a struct tm padrão do ESP32)
+            struct tm timeinfo;
+            if (getLocalTime(&timeinfo)) {
+                // Formata a data e hora idêntico ao resetMsg (ex: [24/06/2026 17:55:01] )
+                strftime(logComTimestamp, sizeof(logComTimestamp), "%d.%m.%Y - %H:%M:%S ", &timeinfo);
+            } else {
+                // Caso o RTC falhe por algum motivo, põe um indicador genérico
+                strcpy(logComTimestamp, "00.00.0000 - 00:00:00 ");
+            }
+            
+            // Concatena o texto original do log que veio da fila
+            strncat(logComTimestamp, logMsg.text, sizeof(logComTimestamp) - strlen(logComTimestamp) - 1);
+            
+            // Envia para o pino virtual do Terminal/Log no Blynk
+            Blynk.virtualWrite(V45, logComTimestamp);
+        }
 
     // Envio rápido a cada 5 segundos
     if (now - lastSendFast >= 5000) {
