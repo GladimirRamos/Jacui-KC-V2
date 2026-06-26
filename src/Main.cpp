@@ -30,7 +30,8 @@
 #include <Adafruit_SSD1306.h>
 #include "Wire.h"
 #include <Preferences.h>
-#include <ModbusMaster.h>
+//#include <ModbusMaster.h>
+#include "ModbusClientRTU.h"
 #include "soc/rtc_wdt.h"
 #include "esp_log.h"
 #include <stdarg.h>
@@ -72,7 +73,9 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 RTC_DS1307 RTC;
 Preferences preferences;
-ModbusMaster node1;
+//ModbusMaster node1;
+// Instanciação do cliente eModbus associado à Serial1
+ModbusClientRTU mbClient(Serial1);
 
 unsigned char output_PLC = 0b11111111;
 
@@ -257,10 +260,10 @@ void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
     if (valor == 1) {
         botoes[tipo].tempoInicio = millis();
         botoes[tipo].aguardando = true;
-        queueLogf("Botao V%d ativo. Aguardando 5 segundos para confirmar...", botoes[tipo].virtualPin);
+        //queueLogf("Botao V%d ativo. Aguardando 5 segundos para confirmar...", botoes[tipo].virtualPin);
     } else {
         if (botoes[tipo].aguardando) {
-            queueLogf("Comando V%d cancelado (botao solto antes dos 5s)", botoes[tipo].virtualPin);
+            //queueLogf("Comando V%d cancelado (botao solto antes dos 5s)", botoes[tipo].virtualPin);
         }
         botoes[tipo].aguardando = false;
     }
@@ -311,10 +314,10 @@ BLYNK_WRITE(V55)
     xSemaphoreGive(mtxData);
   }
 
-  queueLogf("Comando Rele 5: %d", rele);
+  queueLogf("Comando Rele 5: %s", rele == 1 ? "Ligado" : "Desligado");
 }
 
-// =====================================================
+// ==========================p==========================
 // Setup
 // =====================================================
 
@@ -450,10 +453,15 @@ void setup()
   restoreMotorState(memMotorState);
 
   // RS485 / Modbus
-  Serial1.begin(9600, SERIAL_8N1, 14, 27);
-  node1.begin(1, Serial1);
+  //Serial1.begin(9600, SERIAL_8N1, 14, 27);
+  //node1.begin(1, Serial1);
+  //ESP_LOGI(TAG_MODBUS, "RS485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
 
-  ESP_LOGI(TAG_MODBUS, "RS485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
+  // Inicializa a porta serial com os pinos e baudrate definidos (ajuste se necessário)
+  Serial1.begin(9600, SERIAL_8N1, 14, 27);
+  
+  // Inicializa o cliente eModbus
+  //mbClient.begin(Serial1);
 
   // RTC
   if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
@@ -582,7 +590,7 @@ void TaskBlynk(void *pv)
         }
 
     // Envio rápido a cada 5 segundos
-    if (now - lastSendFast >= 5000) {
+    if (now - lastSendFast >= 1000) {
       lastSendFast = now;
 
       SystemTimeData timeCopy;
@@ -1081,31 +1089,55 @@ void TaskDisplay(void *pv)
 // Task Modbus - Core 0
 // =====================================================
 
-void TaskModbus(void *pv)
-{
+void TaskModbus(void *pv) {
   LOG_TASK_START(TAG_MODBUS);
+
+  // Instanciação do cliente eModbus associado à Serial1
+  //ModbusClientRTU mbClient(Serial1);
+  // Inicializa a porta serial com os pinos e baudrate definidos (ajuste se necessário)
+  //Serial1.begin(9600, SERIAL_8N1, 14, 27);
+  
+  // Inicializa o cliente eModbus
+  mbClient.begin(Serial1);
+
+  ESP_LOGI(TAG_MODBUS, "RS485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
 
   for (;;) {
     lastAliveModbus = millis();
 
-    uint16_t result1 = node1.readHoldingRegisters(0x100, 9);
+    // Executa a requisição síncrona (bloqueia apenas esta Task até responder ou dar timeout)
+    // Parâmetros: token (millis), serverID (1), functionCode (READ_HOLD_REG), endereço (0x100), quantidade (9)
+    //ModbusMessage response = mbClient.syncRequest(millis(), 1, READ_HOLD_REG, 0x100, 9);
+    ModbusMessage response = mbClient.syncRequest(millis(), 1, 0x03, 0x100, 9);
 
     ModbusData mb;
     memset(&mb, 0, sizeof(mb));
-    mb.status = result1;
+    
+    // Obtém o código de erro retornado pela eModbus
+    Error err = response.getError();
+    mb.status = err;
 
-    if (result1 == node1.ku8MBSuccess) {
-      mb.vR = node1.getResponseBuffer(0) / 100.00;
-      mb.vS = node1.getResponseBuffer(1) / 100.00;
-      mb.vT = node1.getResponseBuffer(2) / 100.00;
+    if (err == SUCCESS) {
+      uint16_t reg[9];
 
-      mb.iR = (node1.getResponseBuffer(3) / 100.00) - 10;
-      mb.iS = (node1.getResponseBuffer(4) / 100.00) - 5;
-      mb.iT = (node1.getResponseBuffer(5) / 100.00) - 7;
+      // O eModbus armazena a resposta bruta em formato de vetor.
+      // No frame RTU de resposta do código 0x03, os dados úteis começam no offset 3:
+      // [0]=Slave ID, [1]=Função, [2]=Contagem de Bytes, [3...]=Registradores (High/Low)
+      // O método .get() converte automaticamente de Big-Endian (Modbus) para Little-Endian (ESP32)
+      for (int i = 0; i < 9; i++) {
+        response.get(3 + (i * 2), reg[i]);
+      }
 
-      mb.pR = node1.getResponseBuffer(6) / 1000.00;
-      mb.pS = node1.getResponseBuffer(7) / 1000.00;
-      mb.pT = node1.getResponseBuffer(8) / 1000.00;
+      // Aplica as suas equações matemáticas originais com base nos registradores lidos
+      mb.vR   = reg[0] / 100.00;
+      mb.vS   = reg[1] / 100.00;
+      mb.vT   = reg[2] / 100.00;
+      mb.iR   = (reg[3] / 100.00) - 10;
+      mb.iS   = (reg[4] / 100.00) - 5;
+      mb.iT   = (reg[5] / 100.00) - 7;
+      mb.pR   = reg[6] / 1000.00;
+      mb.pS   = reg[7] / 1000.00;
+      mb.pT   = reg[8] / 1000.00;
 
       ESP_LOGI(TAG_MODBUS,
                "RS485 OK | V %.2f %.2f %.2f | I %.2f %.2f %.2f | P %.2f %.2f %.2f",
@@ -1113,9 +1145,11 @@ void TaskModbus(void *pv)
                mb.iR, mb.iS, mb.iT,
                mb.pR, mb.pS, mb.pT);
     } else {
-      ESP_LOGW(TAG_MODBUS, "Falha leitura RS485. Erro=%u", result1);
+      // O ModbusError(err).toStr() converte o código hexadecimal em uma string legível (ex: "TIMEOUT")
+      ESP_LOGW(TAG_MODBUS, "Falha leitura RS485. Erro: %s", (const char *)ModbusError(err));
     }
 
+    // Gravação segura dos dados tratados na struct global utilizando seu Semáforo
     if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
       gModbus = mb;
       xSemaphoreGive(mtxData);
@@ -1123,7 +1157,8 @@ void TaskModbus(void *pv)
       ESP_LOGW(TAG_MODBUS, "Timeout ao gravar dados Modbus compartilhados");
     }
 
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    // Intervalo de tempo entre as leituras (essencial para evitar estouro de Watchdog no Core 0)
+    vTaskDelay(pdMS_TO_TICKS(1000)); 
   }
 }
 
@@ -1161,7 +1196,7 @@ void TaskSupervisor(void *pv)
 
     if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
       gRun.rssi = WiFi.RSSI();
-      gRun.temp = ((temprature_sens_read() - 32) / 1.8) -28;   // -28 para calibrar temperatura ambiente
+      gRun.temp = ((temprature_sens_read() - 32) / 1.8) -30;   // -30, era 28 para calibrar temperatura ambiente
 
       gRun.blynkState = BlynkState::get();
       updateBlynkStateText(gRun.blynkState,
