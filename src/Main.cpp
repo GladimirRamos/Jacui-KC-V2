@@ -68,12 +68,12 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
 #define PCF_OUTPUT_ADDR  0x24
 #define OLED_ADDR        0x3C
 
-#define WDT_TIMEOUT      120000UL
+#define WDT_TIMEOUT      30000UL // 2 minutos = 120.000 ms (UL)
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 RTC_DS1307 RTC;
 Preferences preferences;
-//ModbusMaster node1;
+//ModbusMaster node1
 // Instanciação do cliente eModbus associado à Serial1
 ModbusClientRTU mbClient(Serial1);
 
@@ -298,8 +298,8 @@ BLYNK_WRITE(V40)
   }
 
   saveScheduleToNVS();
-
-  queueLogf("Agenda APP recebida: liga=%lu desliga=%lu dias=%s",
+  // completa "Agenda APP recebida: liga=%lu desliga=%lu dias=%s",
+  queueLogf("Agenda recebida do APP",
             (unsigned long)ligaSec,
             (unsigned long)desligaSec,
             dias.c_str());
@@ -553,13 +553,13 @@ void TaskBlynk(void *pv)
                         case BTN_LIGA:
                             gCmd.forcaLiga = true;
                             xSemaphoreGive(mtxData);
-                            queueLogf("Comando LIGAR");
+                            //queueLogf("Comando LIGAR");
                             break;
 
                         case BTN_DESLIGA:
                             gCmd.forcaDesliga = true;
                             xSemaphoreGive(mtxData);
-                            queueLogf("Comando DESLIGAR");
+                            //queueLogf("Comando DESLIGAR");
                             break;
                     }
                 } else {
@@ -748,8 +748,8 @@ void TaskRTC(void *pv)
              t.wdayBlynk,
              (unsigned long)t.secDay);
 
-    // Calibração automática às 02:00:00 até 02:00:08
-    if (t.hour == 2 && t.min == 0 && t.sec < 9) {
+    // Calibração automática às 05:00:00 ou ano menor que 2026
+    if ((t.hour == 5 && t.min == 0 && t.sec < 2) || (t.year < 2026)) {
       setRTCFromNTP();
       queueLogf("RTC calibrado automaticamente");
     }
@@ -773,10 +773,14 @@ void TaskRTC(void *pv)
     }
 
     if (doRestart) {
-      queueLogf("Reiniciando ESP32 por comando APP");
-      ESP_LOGW(TAG_RTC, "Reiniciando ESP32 por comando APP");
-      delay(1000);
-      ESP.restart();
+      queueLogf("Reiniciando por comando APP");
+      ESP_LOGW(TAG_RTC, "Reiniciando por comando APP");
+      while (true)
+      {
+        /* block code for Task Watchdog Reset */
+      }
+      //delay(1000);
+      //ESP.restart();
     }
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -856,8 +860,8 @@ void TaskIOControl(void *pv)
 
           oldMotorOff = in.motorOff;
 
-          queueLogf("Estado motor mudou: %s",
-                    in.motorOff ? "DESLIGADO" : "LIGADO");
+          //queueLogf("Estado motor mudou: %s",
+          //          in.motorOff ? "DESLIGADO" : "LIGADO");
 
           ESP_LOGI(TAG_NVS,
                    "Estado motor gravado na NVS: %s",
@@ -962,20 +966,20 @@ void TaskIOControl(void *pv)
                sch.diasSemana);
 
       if (diaAtivo && dentroHorario) {
-        // Dentro do horário: LIGA
-        for (; cicloON < 1; cicloON++) {
-          pulseLiga();
-          cicloOFF = 0;
-          queueLogf("Ligar por agendamento");
-          ESP_LOGI(TAG_IO, "Pulso LIGAR por agendamento");
-        }
-      } else {
-        // Fora do horário: DESLIGA
+        // Dentro do horário: DESLIGA
         for (; cicloOFF < 1; cicloOFF++) {
           pulseDesliga();
           cicloON = 0;
           queueLogf("Desligar por agendamento");
           ESP_LOGI(TAG_IO, "Pulso DESLIGAR por agendamento");
+        }
+      } else {
+        // Fora do horário: LIGA
+        for (; cicloON < 1; cicloON++) {
+          pulseLiga();
+          cicloOFF = 0;
+          queueLogf("Ligar por agendamento");
+          ESP_LOGI(TAG_IO, "Pulso LIGAR por agendamento");
         }
       }
     }
@@ -1335,7 +1339,7 @@ void setRTCFromNTP()
     xSemaphoreGive(mtxData);
   }
 
-  queueLogf("RTC calibrado via NTP");
+  //queueLogf("RTC calibrado via NTP");
 }
 
 // =====================================================
