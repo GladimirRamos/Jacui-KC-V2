@@ -860,9 +860,6 @@ void TaskIOControl(void *pv)
 
           oldMotorOff = in.motorOff;
 
-          //queueLogf("Estado motor mudou: %s",
-          //          in.motorOff ? "DESLIGADO" : "LIGADO");
-
           ESP_LOGI(TAG_NVS,
                    "Estado motor gravado na NVS: %s",
                    in.motorOff ? "DESLIGADO" : "LIGADO");
@@ -876,12 +873,14 @@ void TaskIOControl(void *pv)
     ScheduleData sch;
     SystemTimeData timeCopy;
     InputData inputCopy;
+    ModbusData mbCopy; // Adicionado para receber os dados do sensor
 
     if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
       cmd       = gCmd;
       sch       = gSchedule;
       timeCopy  = gTime;
       inputCopy = gInputs;
+      mbCopy    = gModbus; // Copia os dados do Modbus de forma segura
 
       gCmd.forcaLiga    = false;
       gCmd.forcaDesliga = false;
@@ -893,23 +892,44 @@ void TaskIOControl(void *pv)
       continue;
     }
 
-    // Relé 5
+    // --- CONTROLE DOS RELÉS POR CORRENTE (SUPERVISOR INTEGRADO) ---
+    if (mbCopy.status == 0x00) { // Sensor OK
+      double mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0;
+
+      if (mediaCorrente > 20.0) {
+        // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
+        output_PLC &= ~(1 << 2); 
+        output_PLC &= ~(1 << 3); 
+        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA > 20A. Relés 3 e 4 LIGADOS.", mediaCorrente);
+      } else {
+        // Desliga Relé 3 e Relé 4 colocando em nível lógico ALTO (1 = Desligado)
+        output_PLC |= (1 << 2);
+        output_PLC |= (1 << 3);
+      }
+    } else {
+      // Caso o sensor caia ou dê erro, por segurança desliga os relés 3 e 4
+      output_PLC |= (1 << 2);
+      output_PLC |= (1 << 3);
+    }
+
+    // --- CONTROLE DO RELÉ 5 ---
     if (cmd.rele5 == 1) {
       output_PLC &= ~(1 << 4);
     } else {
       output_PLC |= (1 << 4);
     }
 
-    // Sinalização do estado do motor no bit 5
+    // --- SINALIZAÇÃO DO ESTADO DO MOTOR ---
     if (inputCopy.motorOff) {
       output_PLC |= (1 << 5);
     } else {
       output_PLC &= ~(1 << 5);
     }
 
+    // Envia todas as alterações de bits feitas acima para o PCF8574 físico
     writeOutputPLC();
 
-    // Se está em modo local, não comanda via APP/agenda
+    // Se está em modo local, não comanda via APP/agenda abaixo
     if (inputCopy.modoLocal) {
       vTaskDelay(pdMS_TO_TICKS(50));
       continue;
