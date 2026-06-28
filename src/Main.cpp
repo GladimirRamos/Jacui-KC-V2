@@ -180,6 +180,7 @@ struct RuntimeData {
   char blynkStateText[24];
   char modoText[16];
   bool sendResetLog;
+  int valorAnalogico;
 };
 
 SystemTimeData gTime;
@@ -599,6 +600,14 @@ void TaskBlynk(void *pv)
       ScheduleData scheduleCopy;
 
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+         timeCopy      = gTime;
+         inputCopy     = gInputs;
+         runCopy       = gRun;       // runCopy já vai trazer o valorAnalogico atualizado
+        scheduleCopy = gSchedule;
+        xSemaphoreGive(mtxData);
+        }
+
+      if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
         timeCopy     = gTime;
         inputCopy    = gInputs;
         runCopy      = gRun;
@@ -623,6 +632,7 @@ void TaskBlynk(void *pv)
       Blynk.virtualWrite(V43, inputCopy.motorOff ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
       Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
+      Blynk.virtualWrite(V56, runCopy.valorAnalogico); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
 
       if (inputCopy.modoLocal) {
         Blynk.virtualWrite(V49, 0);
@@ -827,6 +837,18 @@ void TaskIOControl(void *pv)
         in.raw       = inputPCF;
         in.motorOff  = inputPCF & (1 << 0); // IN1
         in.modoLocal = inputPCF & (1 << 1); // IN2
+
+        // Leitura analógica do GPIO36 (Faixa nativa de 0 a 4095)
+        int leituraRaw = analogRead(36);
+  
+        // Mapeia o valor de 0-4095 para a escala de 0-100
+        int valorEscalonado = map(leituraRaw, 0, 4095, 0, 100);
+
+        if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+           gInputs = in;
+           gRun.valorAnalogico = valorEscalonado; // <- Salva o valor escalonado com segurança
+           xSemaphoreGive(mtxData);
+           }
 
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
           gInputs = in;
