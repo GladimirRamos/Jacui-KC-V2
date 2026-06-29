@@ -770,7 +770,7 @@ void TaskRTC(void *pv)
              (unsigned long)t.secDay);
 
     // Calibração automática às 05:00:00 ou ano menor que 2026
-    if ((t.hour == 12 && t.min == 00 && t.sec == 00) || (t.year < 2026)) {
+    if ((t.hour == 5 && t.min == 00 && t.sec == 00) || (t.year < 2026)) {
       setRTCFromNTP();
       queueLogf("Relógio calibrado automaticamente");
     }
@@ -1087,21 +1087,21 @@ void TaskDisplay(void *pv)
       display.print(t.sec);
 
       // Temperatura
-      display.setTextSize(1);
       display.setCursor(0, 50);
       display.cp437(true);
       display.print(r.temp);
       display.write(0xF8);
 
+            // Modo
+      display.setCursor(55, 28);
+      display.print(r.modoText);
+
       // RSSI e estado Blynk
+      display.setTextSize(1);
       display.setCursor(44, 57);
       display.print(r.rssi);
       display.print(" ");
       display.print(r.blynkStateText);
-
-      // Modo
-      display.setCursor(55, 28);
-      display.print(r.modoText);
 
       // Barras RSSI
       long rssi = r.rssi;
