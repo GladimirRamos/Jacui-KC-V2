@@ -546,9 +546,20 @@ void TaskBlynk(void *pv)
 
                         case BTN_RESET:
                             gCmd.requestSetRTC = true;
-                            gCmd.requestRestart = true;
+                            
+                            // 1. Zera o contador na estrutura global de execução
+                            //gRun.counterRST = 0;
+                            
+                            // 2. Grava o valor zero diretamente na NVS para persistir no boot
+                            preferences.begin("my-app", false); // Ajuste o nome do namespace se for diferente de "my-app"
+                            preferences.putUInt("counterRST", -1); // -1 porque já soma 1 ao reiniciar, então vai ficar 0
+                            preferences.end();
+                            
+                            // 3. Solicita o restart do sistema (WDT vai atuar na TaskRTC)
+                            gCmd.requestRestart = true; 
+                            
                             xSemaphoreGive(mtxData);
-                            queueLogf("RESET e Calibracao RTC");
+                            //queueLogf("Reiniciando e zerando RST...");
                             break;
 
                         case BTN_LIGA:
@@ -759,9 +770,9 @@ void TaskRTC(void *pv)
              (unsigned long)t.secDay);
 
     // Calibração automática às 05:00:00 ou ano menor que 2026
-    if ((t.hour == 5 && t.min == 0 && t.sec < 2) || (t.year < 2026)) {
+    if ((t.hour == 12 && t.min == 00 && t.sec == 00) || (t.year < 2026)) {
       setRTCFromNTP();
-      queueLogf("RTC calibrado automaticamente");
+      queueLogf("Relógio calibrado automaticamente");
     }
 
     bool doSetRTC  = false;
@@ -779,7 +790,7 @@ void TaskRTC(void *pv)
 
     if (doSetRTC) {
       setRTCFromNTP();
-      queueLogf("RTC calibrado por comando APP");
+      queueLogf("Relógio calibrado por comando APP");
     }
 
     if (doRestart) {
@@ -788,6 +799,8 @@ void TaskRTC(void *pv)
       while (true)
       {
         /* block code for Task Watchdog Reset */
+        ESP_LOGI(TAG_WDT, "RTC Watchdog vai atuar para reiniciar o sistema...");
+        //delay(5000);  // se usar esse Delay vai forçar o RTCWDT_RTC_RESET
       }
       //delay(1000);
       //ESP.restart();
@@ -1372,14 +1385,15 @@ void setRTCFromNTP()
     return;
   }
 
-  preferences.begin("my-app", false);
-  preferences.putUInt("counterRST", 0);
-  preferences.end();
+  // feito nas linhas de BTN_RST 547
+  //preferences.begin("my-app", false);
+  //preferences.putUInt("counterRST", 0);
+  //preferences.end();
 
-  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-    gRun.counterRST = 0;
-    xSemaphoreGive(mtxData);
-  }
+  //if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+  //  gRun.counterRST = 0;
+  //  xSemaphoreGive(mtxData);
+  //}
 
   //queueLogf("RTC calibrado via NTP");
 }
