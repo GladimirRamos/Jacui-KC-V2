@@ -413,8 +413,8 @@ void setup()
 
   // Temporizador inicial
   ESP_LOGI(TAG_MAIN, "Temporizando inicio do sistema");
-
-  for (int tempoStart = 60; tempoStart >= 0; tempoStart--) {
+  // tempoStart = 60; padrão para os motores
+  for (int tempoStart = 3; tempoStart >= 0; tempoStart--) {
     rtc_wdt_feed();
 
     ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
@@ -1081,10 +1081,15 @@ void TaskDisplay(void *pv)
 
       if (t.min < 10) display.print('0');
       display.print(t.min);
-      display.print(":");
+      //display.print(":");
 
-      if (t.sec < 10) display.print('0');
-      display.print(t.sec);
+      //if (t.sec < 10) display.print('0');
+      //display.print(t.sec);
+      // Coração
+      display.setCursor(96, 3);
+      display.write(3);
+
+      //display.fillRect(93, 3, 18, 24, BLACK);  // apaga o coração
 
       // Temperatura
       display.setCursor(0, 50);
