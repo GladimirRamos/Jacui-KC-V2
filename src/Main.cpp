@@ -31,7 +31,6 @@
 #include <Adafruit_SSD1306.h>
 #include "Wire.h"
 #include <Preferences.h>
-//#include <ModbusMaster.h>
 #include "ModbusClientRTU.h"
 #include "soc/rtc_wdt.h"
 #include "esp_log.h"
@@ -202,6 +201,13 @@ uint32_t lastAliveRTC     = 0;
 uint32_t lastAliveDisplay = 0;
 uint32_t lastAliveModbus  = 0;
 
+// Variáveis globais para armazenar o tempo gasto (em microssegundos)
+volatile uint32_t tempoTaskBlynk   = 0;
+volatile uint32_t tempoTaskIO      = 0;
+volatile uint32_t tempoTaskRTC     = 0;
+volatile uint32_t tempoTaskDisplay = 0;
+volatile uint32_t tempoTaskModbus  = 0;
+
 // =====================================================
 // Protótipos
 // =====================================================
@@ -319,7 +325,39 @@ BLYNK_WRITE(V55)
   queueLogf("Comando Rele 5: %s", rele == 1 ? "Ligado" : "Desligado");
 }
 
-// ==========================p==========================
+// =====================================================
+// Função de estatisticas DIAGNÓSTICO DE SAÚDE 
+// =====================================================
+
+void imprimirDiagnosticoSistema() {
+    Serial.println(F("\n==================================================="));
+    Serial.println(F("         DIAGNÓSTICO DE SAÚDE DO ESP32       "));
+    Serial.println(F("==================================================="));
+
+    // 1. Tempo de atividade (Uptime)
+    uint64_t uptime_us = esp_timer_get_time();
+    uint32_t uptime_s = (uint32_t)(uptime_us / 1000000ULL);
+    Serial.printf("Tempo ligado (Uptime): %u segundos (%u minutos)\n", uptime_s, uptime_s / 60);
+
+    // 2. Memória RAM (Heap) - Crítico para sistemas com WiFi/Blynk
+    uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t min_free_heap = esp_get_minimum_free_heap_size(); // Menor nível de RAM que o chip já atingiu
+    Serial.printf("Memória RAM Livre Atual: %u bytes\n", free_heap);
+    Serial.printf("Menor RAM Livre Histórica: %u bytes\n", min_free_heap);
+
+    if (min_free_heap < 10000) {
+        Serial.println(F("[ALERTA]: Memória RAM perigosamente baixa! Risco de crash."));
+    }
+
+    // 3. Frequência do Processador
+    Serial.printf("Frequência da CPU: %u MHz\n", getCpuFrequencyMhz());
+
+    // 4. Detalhes de Chip e Modelo
+    Serial.printf("Revisão do Chip ESP32: %d\n", ESP.getChipRevision());
+    Serial.println(F("---------------------------------------------------"));
+}
+
+// =====================================================
 // Setup
 // =====================================================
 
@@ -454,16 +492,8 @@ void setup()
 
   restoreMotorState(memMotorState);
 
-  // RS485 / Modbus
-  //Serial1.begin(9600, SERIAL_8N1, 14, 27);
-  //node1.begin(1, Serial1);
-  //ESP_LOGI(TAG_MODBUS, "RS485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
-
   // Inicializa a porta serial com os pinos e baudrate definidos (ajuste se necessário)
   Serial1.begin(9600, SERIAL_8N1, 14, 27);
-  
-  // Inicializa o cliente eModbus
-  //mbClient.begin(Serial1);
 
   // RTC
   if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
@@ -497,7 +527,12 @@ void setup()
 
 void loop()
 {
-  vTaskDelay(portMAX_DELAY);
+  // Tarefa que mostra um diagnóstico de saude do ESP32 a cada 10 segundos, mas está comentada para não poluir o log
+  static uint32_t temporizadorDiagnostico = 0;
+  if (millis() - temporizadorDiagnostico > 10000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
+  vTaskDelay(pdMS_TO_TICKS(1)); 
+  
+  //vTaskDelay(portMAX_DELAY); //coloca a tarefa do loop() em estado de bloqueio permanente 
 }
 
 // =====================================================
