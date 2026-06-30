@@ -19,6 +19,7 @@
 #define BLYNK_FIRMWARE_VERSION "0.1.0"
 
 #define USE_ESP32_DEV_MODULE
+#define HEARTBEAT_PIN 23
 
 #include <WiFi.h>
 #include "time.h"
@@ -1050,11 +1051,15 @@ void TaskIOControl(void *pv)
 void TaskDisplay(void *pv)
 {
   LOG_TASK_START(TAG_DISPLAY);
-  
+
+  // Configura o GPIO 23 como saída
+  pinMode(HEARTBEAT_PIN, OUTPUT);
   // Variável estática para guardar o segundo da última atualização válida
   static int ultimoSegundo = -1;
   // Tornar a variável static para manter o estado entre os loops
   static bool heartBeat = false;
+  // Variável para controlar o tempo da última batida (em milissegundos)
+  static uint32_t ultimoHeartbeatMs = 0;
 
   for (;;) {
     lastAliveDisplay = millis();
@@ -1071,9 +1076,13 @@ void TaskDisplay(void *pv)
       vTaskDelay(pdMS_TO_TICKS(500)); // Reduzido para tentar novamente mais rápido em caso de falha
       continue;
     }
+    
+    // Variáveis de controle para decidir se precisamos atualizar o display
+    bool segundoMudou = (t.sec != ultimoSegundo);
+    bool meioSegundoPassou = (millis() - ultimoHeartbeatMs >= 500);
 
-    // Só tenta pegar o Mutex do I2C e atualizar a tela se o t.sec mudou!
-    if (t.sec != ultimoSegundo) {
+    // Condição: Atualiza se o segundo mudou OU se já passou 500ms desde o último pulso do coração
+    if (segundoMudou || meioSegundoPassou) {
 
       if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
         display.clearDisplay();
@@ -1094,7 +1103,19 @@ void TaskDisplay(void *pv)
         // if (t.sec < 10) display.print('0');
         // display.print(t.sec);
 
-        heartBeat = !heartBeat; // Inverte a cada segundo
+        //heartBeat = !heartBeat; // Inverte a cada segundo
+
+        // Se a atualização foi motivada pelo tempo (500ms), invertemos o coração
+        if (meioSegundoPassou) {
+          heartBeat = !heartBeat; // Inverte o estado do heartBeat
+
+          // --- PISCA O LED FÍSICO ---
+          // saida para o Hardware Heartbeat
+          digitalWrite(HEARTBEAT_PIN, heartBeat);
+          //digitalWrite(HEARTBEAT_PIN, heartBeat ? HIGH : LOW);
+          ultimoHeartbeatMs = millis(); // Reseta o cronômetro do heartbeat
+        }
+
         if (heartBeat) {
           // Batida alta: Desenha o coração cheio na posição original
           display.setCursor(96, 3);
