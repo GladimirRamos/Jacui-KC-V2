@@ -1050,6 +1050,11 @@ void TaskIOControl(void *pv)
 void TaskDisplay(void *pv)
 {
   LOG_TASK_START(TAG_DISPLAY);
+  
+  // Variável estática para guardar o segundo da última atualização válida
+  static int ultimoSegundo = -1;
+  // Tornar a variável static para manter o estado entre os loops
+  static bool heartBeat = false;
 
   for (;;) {
     lastAliveDisplay = millis();
@@ -1063,89 +1068,117 @@ void TaskDisplay(void *pv)
       xSemaphoreGive(mtxData);
     } else {
       ESP_LOGW(TAG_DISPLAY, "Timeout ao copiar dados compartilhados");
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(500)); // Reduzido para tentar novamente mais rápido em caso de falha
       continue;
     }
 
-    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
-      display.clearDisplay();
-      display.setTextColor(SSD1306_WHITE);
+    // Só tenta pegar o Mutex do I2C e atualizar a tela se o t.sec mudou!
+    if (t.sec != ultimoSegundo) {
 
-      // Hora
-      display.setTextSize(2);
-      display.setCursor(15, 0);
+      if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+        display.clearDisplay();
+        display.setTextColor(SSD1306_WHITE);
 
-      if (t.hour < 10) display.print(' ');
-      display.print(t.hour);
-      display.print(":");
+        // Hora
+        display.setTextSize(2);
+        display.setCursor(15, 0);
 
-      if (t.min < 10) display.print('0');
-      display.print(t.min);
-      //display.print(":");
+        if (t.hour < 10) display.print(' ');
+        display.print(t.hour);
+        display.print(":");
 
-      //if (t.sec < 10) display.print('0');
-      //display.print(t.sec);
-      // Coração
-      display.setCursor(96, 3);
-      display.write(3);
+        if (t.min < 10) display.print('0');
+        display.print(t.min);
+        // Descomente abaixo se quiser exibir os segundos na tela também:
+        // display.print(":");
+        // if (t.sec < 10) display.print('0');
+        // display.print(t.sec);
 
-      //display.fillRect(93, 3, 18, 24, BLACK);  // apaga o coração
+        heartBeat = !heartBeat; // Inverte a cada segundo
+        if (heartBeat) {
+          // Batida alta: Desenha o coração cheio na posição original
+          display.setCursor(96, 3);
+          display.write(3); 
+        } else {
+          // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
+          // para simular o pulso contraindo (ex: o caractere '.' ou um espaço)
+          display.setCursor(96, 3); // Centraliza levemente o ponto se quiser usar
+          display.print(" "); 
+        }
+        
+        /*
+        // Coração pisca na tela
+        heartBeat = !heartBeat;     // Inverte o estado do heartBeat
+        if (heartBeat) {
+        display.setCursor(96, 3);
+        display.write(3); // Desenha o coração ♥
+        } else {
+        display.fillRect(96, 3, 18, 24, BLACK); // Apaga desenhando por cima
+        }
+        */
 
-      // Temperatura
-      display.setCursor(0, 50);
-      display.cp437(true);
-      display.print(r.temp);
-      display.write(0xF8);
 
-            // Modo
-      display.setCursor(55, 28);
-      display.print(r.modoText);
+        // Temperatura
+        display.setCursor(0, 50);
+        display.cp437(true);
+        display.print(r.temp);
+        display.write(0xF8);
 
-      // RSSI e estado Blynk
-      display.setTextSize(1);
-      display.setCursor(44, 57);
-      display.print(r.rssi);
-      display.print(" ");
-      display.print(r.blynkStateText);
+        // Modo
+        display.setCursor(55, 28);
+        display.print(r.modoText);
 
-      // Barras RSSI
-      long rssi = r.rssi;
+        // RSSI e estado Blynk
+        display.setTextSize(1);
+        display.setCursor(44, 57);
+        display.print(r.rssi);
+        display.print(" ");
+        display.print(r.blynkStateText);
 
-      if (rssi > -55 && rssi < -3) {
-        display.fillRect(40, 25, 4, 17, WHITE);
-        display.fillRect(33, 29, 4, 13, WHITE);
-        display.fillRect(26, 33, 4, 9, WHITE);
-        display.fillRect(19, 37, 4, 5, WHITE);
-      } else if (rssi < -55 && rssi > -70) {
-        display.drawRect(40, 25, 4, 17, WHITE);
-        display.fillRect(33, 29, 4, 13, WHITE);
-        display.fillRect(26, 33, 4, 9, WHITE);
-        display.fillRect(19, 37, 4, 5, WHITE);
-      } else if (rssi < -70 && rssi > -78) {
-        display.drawRect(40, 25, 4, 17, WHITE);
-        display.drawRect(33, 29, 4, 13, WHITE);
-        display.fillRect(26, 33, 4, 9, WHITE);
-        display.fillRect(19, 37, 4, 5, WHITE);
-      } else if (rssi < -78 && rssi > -82) {
-        display.drawRect(40, 25, 4, 17, WHITE);
-        display.drawRect(33, 29, 4, 13, WHITE);
-        display.drawRect(26, 33, 4, 9, WHITE);
-        display.fillRect(19, 37, 4, 5, WHITE);
+        // Barras RSSI
+        long rssi = r.rssi;
+        if (rssi > -55 && rssi < -3) {
+          display.fillRect(40, 25, 4, 17, WHITE);
+          display.fillRect(33, 29, 4, 13, WHITE);
+          display.fillRect(26, 33, 4, 9, WHITE);
+          display.fillRect(19, 37, 4, 5, WHITE);
+        } else if (rssi < -55 && rssi > -70) {
+          display.drawRect(40, 25, 4, 17, WHITE);
+          display.fillRect(33, 29, 4, 13, WHITE);
+          display.fillRect(26, 33, 4, 9, WHITE);
+          display.fillRect(19, 37, 4, 5, WHITE);
+        } else if (rssi < -70 && rssi > -78) {
+          display.drawRect(40, 25, 4, 17, WHITE);
+          display.drawRect(33, 29, 4, 13, WHITE);
+          display.fillRect(26, 33, 4, 9, WHITE);
+          display.fillRect(19, 37, 4, 5, WHITE);
+        } else if (rssi < -78 && rssi > -82) {
+          display.drawRect(40, 25, 4, 17, WHITE);
+          display.drawRect(33, 29, 4, 13, WHITE);
+          display.drawRect(26, 33, 4, 9, WHITE);
+          display.fillRect(19, 37, 4, 5, WHITE);
+        } else {
+          display.drawRect(40, 25, 4, 17, WHITE);
+          display.drawRect(33, 29, 4, 13, WHITE);
+          display.drawRect(26, 33, 4, 9, WHITE);
+          display.drawRect(19, 37, 4, 5, WHITE);
+        }
+
+        display.display();
+
+        xSemaphoreGive(mtxI2C);
+
+        // Salva o segundo atual para a próxima comparação
+        ultimoSegundo = t.sec; 
+
       } else {
-        display.drawRect(40, 25, 4, 17, WHITE);
-        display.drawRect(33, 29, 4, 13, WHITE);
-        display.drawRect(26, 33, 4, 9, WHITE);
-        display.drawRect(19, 37, 4, 5, WHITE);
+        ESP_LOGW(TAG_DISPLAY, "Timeout ao acessar I2C para display");
       }
-
-      display.display();
-
-      xSemaphoreGive(mtxI2C);
-    } else {
-      ESP_LOGW(TAG_DISPLAY, "Timeout ao acessar I2C para display");
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // IMPORTANTE: Reduzido de 1000ms para 50ms para que a Task verifique 
+    // a mudança de segundo de forma responsiva sem prender o processador.
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
