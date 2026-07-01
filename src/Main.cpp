@@ -227,7 +227,7 @@ void pulseLiga();
 void pulseDesliga();
 
 void queueLogf(const char *fmt, ...);
-void setRTCFromNTP();
+bool setRTCFromNTP();
 
 void loadCounterAndMotorState(bool &memMotorState);
 void loadSettingsFromNVS();
@@ -453,7 +453,7 @@ void setup()
   // Temporizador inicial
   ESP_LOGI(TAG_MAIN, "Temporizando inicio do sistema");
   // tempoStart = 60; padrão para os motores
-  for (int tempoStart = 3; tempoStart >= 0; tempoStart--) {
+  for (int tempoStart = 60; tempoStart >= 0; tempoStart--) {
     rtc_wdt_feed();
 
     ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
@@ -529,7 +529,7 @@ void loop()
 {
   // Tarefa que mostra um diagnóstico de saude do ESP32 a cada 10 segundos, mas está comentada para não poluir o log
   static uint32_t temporizadorDiagnostico = 0;
-  if (millis() - temporizadorDiagnostico > 10000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
+  if (millis() - temporizadorDiagnostico > 60000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
   vTaskDelay(pdMS_TO_TICKS(1)); 
   
   //vTaskDelay(portMAX_DELAY); //coloca a tarefa do loop() em estado de bloqueio permanente 
@@ -756,6 +756,10 @@ void TaskBlynk(void *pv)
 void TaskRTC(void *pv)
 {
   LOG_TASK_START(TAG_RTC);
+  
+  // Mantemos a flag aqui, mas controlamos estritamente suas mudanças
+  bool setRTCToday = false; 
+  bool logBateriaEnviado = false; // Nova flag para evitar travar o ESP com logs infinitos
 
   for (;;) {
     lastAliveRTC = millis();
@@ -780,7 +784,7 @@ void TaskRTC(void *pv)
     t.month = now.month();
     t.year  = now.year();
 
-    int rtcWday = now.dayOfTheWeek(); // 0 domingo ... 6 sabado
+    int rtcWday = now.dayOfTheWeek(); 
     t.wdayBlynk = rtcWday == 0 ? 7 : rtcWday;
 
     t.secDay = (t.hour * 3600UL) + (t.min * 60UL) + t.sec;
@@ -805,10 +809,33 @@ void TaskRTC(void *pv)
              t.wdayBlynk,
              (unsigned long)t.secDay);
 
-    // Calibração automática às 05:00:00 ou ano menor que 2026
-    if ((t.hour == 5 && t.min == 00 && t.sec == 00) || (t.year < 2026)) {
+    // Evita que o log de bateria fraca rode em loop infinito a cada 1 segundo
+    // se ano menor e calibração NTP falhar, apenas loga uma vez e espera o ano voltar ao normal para resetar a flag
+    if (t.year < 2026 && setRTCFromNTP()) {
       setRTCFromNTP();
-      queueLogf("Relógio calibrado automaticamente");
+      if (!logBateriaEnviado) {
+        queueLogf("Relógio calibrado, ver bateria!");
+        logBateriaEnviado = true;
+      }
+    } else {
+      logBateriaEnviado = false; // Reseta se o ano voltar ao normal
+    }
+
+     // Executa a calibração automática apenas se a flag for falsa
+    if (t.hour == 18 && t.min == 0 && !setRTCToday) {
+      // Só marca como feito se a função retornar 'true' (sucesso)
+      if (setRTCFromNTP()) {
+        queueLogf("Relógio calibrado automaticamente");
+        setRTCToday = true;  
+        } else {
+          // vai ficar tentando a cada segundo até , mas não vai travar o ESP por 1 minuto, apenas loga a falha 
+          ESP_LOGE(TAG_RTC, "Tentativa de calibração falhou. Tentando novamente no próximo segundo...");
+        }
+    }
+
+    // Só reseta a flag se ela estiver marcada como true. Evita processamento inútil no minuto 5:01.
+    if (t.hour == 18 && t.min == 1 && setRTCToday) {
+      setRTCToday = false; 
     }
 
     bool doSetRTC  = false;
@@ -834,12 +861,9 @@ void TaskRTC(void *pv)
       ESP_LOGW(TAG_RTC, "Reiniciando por comando APP");
       while (true)
       {
-        /* block code for Task Watchdog Reset */
         ESP_LOGI(TAG_WDT, "RTC Watchdog vai atuar para reiniciar o sistema...");
-        //delay(5000);  // se usar esse Delay vai forçar o RTCWDT_RTC_RESET
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Evita que o Core do ESP trave sem alimentar o IDLE do RTOS
       }
-      //delay(1000);
-      //ESP.restart();
     }
 
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1445,7 +1469,7 @@ void queueLogf(const char *fmt, ...)
 // RTC via NTP
 // =====================================================
 
-void setRTCFromNTP()
+bool setRTCFromNTP() // Alterado de void para bool
 {
   struct tm timeinfo;
 
@@ -1454,7 +1478,7 @@ void setRTCFromNTP()
   if (!getLocalTime(&timeinfo)) {
     ESP_LOGW(TAG_RTC, "Falha ao sincronizar NTP");
     queueLogf("Falha sincronismo NTP");
-    return;
+    return false; // Retorna falso se falhar a internet/NTP
   }
 
   int ye = timeinfo.tm_year + 1900;
@@ -1476,20 +1500,10 @@ void setRTCFromNTP()
     ESP_LOGI(TAG_RTC, "RTC DS1307 ajustado com sucesso");
   } else {
     ESP_LOGE(TAG_RTC, "Timeout ao tentar ajustar RTC via I2C");
-    return;
+    return false; // Retorna falso se falhar o barramento I2C
   }
 
-  // feito nas linhas de BTN_RST 547
-  //preferences.begin("my-app", false);
-  //preferences.putUInt("counterRST", 0);
-  //preferences.end();
-
-  //if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-  //  gRun.counterRST = 0;
-  //  xSemaphoreGive(mtxData);
-  //}
-
-  //queueLogf("RTC calibrado via NTP");
+  return true; // Retorna verdadeiro se tudo deu certo!
 }
 
 // =====================================================
