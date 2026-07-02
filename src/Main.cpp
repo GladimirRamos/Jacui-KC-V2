@@ -110,6 +110,16 @@ TaskHandle_t taskDisplayHandle    = NULL;
 TaskHandle_t taskModbusHandle     = NULL;
 TaskHandle_t taskSupervisorHandle = NULL;
 
+// Tamanho de pilha para cada tarefa (em bytes)
+#define STACK_BLYNK        8192
+#define STACK_IO_CONTROL   3072
+#define STACK_RTC          4096 //2048 - CRASH RESET - 
+//Guru Meditation Error: Core  0 panic'ed (Unhandled debug exception). 
+//Debug exception reason: Stack canary watchpoint triggered (TaskRTC) 
+#define STACK_DISPLAY      3584
+#define STACK_MODBUS       4096
+#define STACK_SUPERVISOR   2048
+
 SemaphoreHandle_t mtxI2C  = NULL;
 SemaphoreHandle_t mtxData = NULL;
 
@@ -361,29 +371,27 @@ void imprimirDiagnosticoSistema() {
 // Setup
 // =====================================================
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
   delay(300);
 
   esp_log_level_set("*", ESP_LOG_INFO);
-
   ESP_LOGI(TAG_MAIN, "Inicializando firmware %s", BLYNK_FIRMWARE_VERSION);
   ESP_LOGI(TAG_MAIN, "Setup rodando no core %d", xPortGetCoreID());
 
   initRtcWdt();
 
+  // Criação dos recursos do FreeRTOS
   mtxI2C  = xSemaphoreCreateMutex();
   mtxData = xSemaphoreCreateMutex();
   qLog    = xQueueCreate(20, sizeof(LogMessage));
 
   if (!mtxI2C || !mtxData || !qLog) {
     ESP_LOGE(TAG_MAIN, "Falha ao criar mutex ou fila");
-    while (1) {
-      delay(1000);
-    }
+    while (1) { delay(1000); }
   }
 
+  // Inicialização das estruturas de dados
   memset(&gTime, 0, sizeof(gTime));
   memset(&gInputs, 0, sizeof(gInputs));
   memset(&gSchedule, 0, sizeof(gSchedule));
@@ -394,10 +402,11 @@ void setup()
   strncpy(gRun.blynkStateText, "START", sizeof(gRun.blynkStateText) - 1);
   strncpy(gRun.modoText, "START", sizeof(gRun.modoText) - 1);
 
+  // Inicializa Barramento I2C
   Wire.begin(I2C_SDA, I2C_SCL);
-
   ESP_LOGI(TAG_I2C, "I2C iniciado SDA=%d SCL=%d", I2C_SDA, I2C_SCL);
 
+  // Inicializa Display OLED
   if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
     display.clearDisplay();
@@ -413,14 +422,12 @@ void setup()
     xSemaphoreGive(mtxI2C);
 
     if (errorCode_OUTPUT != 0) {
-      ESP_LOGE(TAG_I2C, "Falha no PCF8574 de saida. Endereco=0x%02X erro=%d",
-               PCF_OUTPUT_ADDR, errorCode_OUTPUT);
+      ESP_LOGE(TAG_I2C, "Falha no PCF8574 de saida. Endereco=0x%02X erro=%d", PCF_OUTPUT_ADDR, errorCode_OUTPUT);
       failMSG("FALHA OUTPUT");
     } else {
       ESP_LOGI(TAG_I2C, "PCF8574 saida OK. Endereco=0x%02X", PCF_OUTPUT_ADDR);
     }
   }
-
   delay(50);
 
   // Teste PCF8574 entrada
@@ -430,76 +437,105 @@ void setup()
     xSemaphoreGive(mtxI2C);
 
     if (errorCode_INPUT != 0) {
-      ESP_LOGE(TAG_I2C, "Falha no PCF8574 de entrada. Endereco=0x%02X erro=%d",
-               PCF_INPUT_ADDR, errorCode_INPUT);
+      ESP_LOGE(TAG_I2C, "Falha no PCF8574 de entrada. Endereco=0x%02X erro=%d", PCF_INPUT_ADDR, errorCode_INPUT);
       failMSG("FALHA INPUT");
     } else {
       ESP_LOGI(TAG_I2C, "PCF8574 entrada OK. Endereco=0x%02X", PCF_INPUT_ADDR);
     }
   }
-
   delay(50);
 
   bool memMotorState = true;
-
   loadCounterAndMotorState(memMotorState);
   loadSettingsFromNVS();
 
   ESP_LOGI(TAG_NVS, "Quantidade de RESETs: %lu", (unsigned long)gRun.counterRST);
-
   esp_reset_reason_t reason = esp_reset_reason();
   ESP_LOGI(TAG_WDT, "Reset reason: %d - %s", reason, resetReasonName(reason));
 
-  // Temporizador inicial
+  // Configura o GPIO do LED Heartbeat
+  pinMode(HEARTBEAT_PIN, OUTPUT);
+
+  // --- NOVA LÓGICA DE TEMPORIZAÇÃO ASSÍNCRONA DE INICIALIZAÇÃO (60s) ---
   ESP_LOGI(TAG_MAIN, "Temporizando inicio do sistema");
-  // tempoStart = 60; padrão para os motores
-  for (int tempoStart = 60; tempoStart >= 0; tempoStart--) {
-    rtc_wdt_feed();
+  
+  int tempoStart = 60;
+  uint32_t tempoZeroMs = millis();
+  uint32_t ultimoHeartbeatMs = 0;
+  uint32_t ultimoDisplayMs = 0;
+  bool heartBeat = false;
 
-    ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
+  while (tempoStart >= 0) {
+    uint32_t currentMs = millis();
+    rtc_wdt_feed(); // Alimenta o Watchdog do RTC/Sistema
 
-    if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
-      display.clearDisplay();
-      display.setTextSize(2);
-      display.setTextColor(SSD1306_WHITE);
-
-      display.setCursor(45, 10);
-      display.println("R&M");
-
-      display.setTextSize(1);
-      display.setCursor(42, 30);
-      display.println("Company");
-
-      display.setCursor(5, 55);
-      display.print("RST:");
-      display.println(gRun.counterRST);
-
-      display.setCursor(70, 55);
-      display.print("FW:");
-      display.println(BLYNK_FIRMWARE_VERSION);
-
-      display.setTextSize(2);
-      display.setCursor(96, 24);
-      display.print(tempoStart);
-
-      display.display();
-
-      xSemaphoreGive(mtxI2C);
+    // Atualiza o Heartbeat Físico a cada 500ms
+    if (currentMs - ultimoHeartbeatMs >= 500) {
+      ultimoHeartbeatMs = currentMs;
+      heartBeat = !heartBeat;
+      digitalWrite(HEARTBEAT_PIN, heartBeat);
     }
 
-    delay(960);
+    // Atualiza a contagem regressiva e a tela a cada 1000ms (1 segundo)
+    if (currentMs - ultimoDisplayMs >= 1000) {
+      ultimoDisplayMs = currentMs;
+      ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
+
+      if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+        display.clearDisplay();
+        
+        // Cabeçalho da Empresa
+        display.setTextSize(2);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(45, 10);
+        display.println("R&M");
+        display.setTextSize(1);
+        display.setCursor(42, 30);
+        display.println("Company");
+        
+        // Informações de Diagnóstico
+        display.setCursor(5, 55);
+        display.print("RST:");
+        display.println(gRun.counterRST);
+        display.setCursor(70, 55);
+        display.print("FW:");
+        display.println(BLYNK_FIRMWARE_VERSION);
+
+        // Contador de Inicialização
+        display.setTextSize(2);
+        display.setCursor(96, 24);
+        display.print(tempoStart);
+
+        if (heartBeat) {
+          // Batida alta: Desenha o coração cheio na posição original
+          display.setCursor(96, 3);
+          display.write(3); 
+        } else {
+          // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
+          display.setCursor(96, 3);
+          display.print(" "); 
+        }
+        
+        display.display();
+        xSemaphoreGive(mtxI2C);
+      }
+
+      tempoStart--; // Decrementa o segundo
+    }
+
+    // Evita o travamento total da CPU 0/1 permitindo que o IDF processe background tasks
+    delay(10); 
   }
 
   restoreMotorState(memMotorState);
 
-  // Inicializa a porta serial com os pinos e baudrate definidos (ajuste se necessário)
+  // Inicializa Serial Modbus/Hardware Secundário
   Serial1.begin(9600, SERIAL_8N1, 14, 27);
 
-  // RTC
+  // Inicializa RTC Externo
   if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
     bool rtcOk = RTC.begin();
     xSemaphoreGive(mtxI2C);
-
     if (!rtcOk) {
       ESP_LOGE(TAG_RTC, "Nao foi possivel encontrar o RTC DS1307");
       failMSG("FALHA RTC");
@@ -508,18 +544,23 @@ void setup()
     }
   }
 
+  // Inicializa Sincronismo NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  ESP_LOGI(TAG_RTC, "NTP configurado. Servidor=%s GMT offset=%ld daylight=%d", ntpServer, gmtOffset_sec, daylightOffset_sec);
 
-  ESP_LOGI(TAG_RTC, "NTP configurado. Servidor=%s GMT offset=%ld daylight=%d",
-           ntpServer, gmtOffset_sec, daylightOffset_sec);
-
-  // Criação das tasks
-  xTaskCreatePinnedToCore(TaskBlynk,      "TaskBlynk",      10000, NULL, 3, &taskBlynkHandle,      1);
-  xTaskCreatePinnedToCore(TaskIOControl,  "TaskIOControl",  4096,  NULL, 4, &taskIOHandle,         0);
-  xTaskCreatePinnedToCore(TaskRTC,        "TaskRTC",        4096,  NULL, 3, &taskRTCHandle,        0);
-  xTaskCreatePinnedToCore(TaskDisplay,    "TaskDisplay",    4096,  NULL, 1, &taskDisplayHandle,    0);
-  xTaskCreatePinnedToCore(TaskModbus,     "TaskModbus",     4096,  NULL, 2, &taskModbusHandle,     0);
-  xTaskCreatePinnedToCore(TaskSupervisor, "TaskSupervisor", 3072,  NULL, 5, &taskSupervisorHandle, 0);
+  // =====================================================
+  // Criação e Inicialização das Tarefas do FreeRTOS
+  // =====================================================
+  
+  // TaskBlynk: Roda no Core 1 (Core padrão do ecossistema Arduino/Wi-Fi)
+  xTaskCreatePinnedToCore(TaskBlynk, "TaskBlynk", STACK_BLYNK, NULL, 3, &taskBlynkHandle, 1);
+  
+  // Tasks de Hardware/Controle: Rodam no Core 0 para não sofrerem interferência do Wi-Fi
+  xTaskCreatePinnedToCore(TaskIOControl, "TaskIOControl", STACK_IO_CONTROL, NULL, 4, &taskIOHandle, 0);
+  xTaskCreatePinnedToCore(TaskRTC, "TaskRTC", STACK_RTC, NULL, 3, &taskRTCHandle, 0);
+  xTaskCreatePinnedToCore(TaskDisplay, "TaskDisplay", STACK_DISPLAY, NULL, 1, &taskDisplayHandle, 0);
+  xTaskCreatePinnedToCore(TaskModbus, "TaskModbus", STACK_MODBUS, NULL, 2, &taskModbusHandle, 0);
+  xTaskCreatePinnedToCore(TaskSupervisor, "TaskSupervisor", STACK_SUPERVISOR, NULL, 5, &taskSupervisorHandle, 0);
 
   ESP_LOGI(TAG_MAIN, "----------------------- SETUP OK ---------------------------");
   LOG_HEAP(TAG_MAIN);
@@ -1162,17 +1203,13 @@ void TaskDisplay(void *pv)
         // if (t.sec < 10) display.print('0');
         // display.print(t.sec);
 
-        //heartBeat = !heartBeat; // Inverte a cada segundo
-
         // Se a atualização foi motivada pelo tempo (500ms), invertemos o coração
         if (meioSegundoPassou) {
           heartBeat = !heartBeat; // Inverte o estado do heartBeat
 
-          // --- PISCA O LED FÍSICO ---
           // saida para o Hardware Heartbeat
-          digitalWrite(HEARTBEAT_PIN, heartBeat);
-          //digitalWrite(HEARTBEAT_PIN, heartBeat ? HIGH : LOW);
-          ultimoHeartbeatMs = millis(); // Reseta o cronômetro do heartbeat
+          digitalWrite(HEARTBEAT_PIN, heartBeat);   // ---   PISCA O LED FÍSICO   ---
+          ultimoHeartbeatMs = millis();             // Reseta o cronômetro do heartbeat
         }
 
         if (heartBeat) {
@@ -1181,22 +1218,9 @@ void TaskDisplay(void *pv)
           display.write(3); 
         } else {
           // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
-          // para simular o pulso contraindo (ex: o caractere '.' ou um espaço)
-          display.setCursor(96, 3); // Centraliza levemente o ponto se quiser usar
+          display.setCursor(96, 3);
           display.print(" "); 
         }
-        
-        /*
-        // Coração pisca na tela
-        heartBeat = !heartBeat;     // Inverte o estado do heartBeat
-        if (heartBeat) {
-        display.setCursor(96, 3);
-        display.write(3); // Desenha o coração ♥
-        } else {
-        display.fillRect(96, 3, 18, 24, BLACK); // Apaga desenhando por cima
-        }
-        */
-
 
         // Temperatura
         display.setCursor(0, 50);
@@ -1385,6 +1409,24 @@ void TaskSupervisor(void *pv)
       ESP_LOGW(TAG_SUPERVISOR, "Timeout ao atualizar dados runtime");
     }
 
+    // Print de diagnóstico (temporizado ou esporádico).  USAR PARA DEBUG, NÃO DEIXAR ATIVO EM PRODUÇÃO
+
+    // --- Executa também o relatório de monitoramento de memória ---
+    /*
+    ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
+    if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %d B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
+    if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %d B", uxTaskGetStackHighWaterMark(taskIOHandle));
+    if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %d B", uxTaskGetStackHighWaterMark(taskRTCHandle));
+    if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %d B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
+    if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %d B", uxTaskGetStackHighWaterMark(taskModbusHandle));
+    ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
+    ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
+    */
+    //Se o log apontar valores muito baixos (ex: menores que 150-200 bytes): Aumente o valor do respectivo #define STACK_XXX
+    
+    //Se o log apontar valores muito altos constantemente (ex: sobrando 1500 bytes ou mais): Significa que a tarefa foi superdimensionada. 
+    //Você pode diminuir com segurança o respectivo #define STACK_XXX para liberar mais memória RAM (Heap) global para o sistema.
+    
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
