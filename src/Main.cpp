@@ -1451,7 +1451,7 @@ void TaskSupervisor(void *pv) {
 
          bool ok = 
             !rtcError &&
-            (now - lastAliveBlynk   < 60000UL) &&
+            (now - lastAliveBlynk   < 120000UL) &&
             (now - lastAliveIO      < 10000UL) &&
             (now - lastAliveRTC     < 10000UL) &&
             (now - lastAliveDisplay < 15000UL) &&
