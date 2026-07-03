@@ -191,6 +191,7 @@ struct RuntimeData {
   char modoText[16];
   bool sendResetLog;
   int valorAnalogico;
+  bool rtcError;  // Sinaliza erro crítico do RTC
 };
 
 SystemTimeData gTime;
@@ -365,11 +366,87 @@ void imprimirDiagnosticoSistema() {
     // 4. Detalhes de Chip e Modelo
     Serial.printf("Revisão do Chip ESP32: %d\n", ESP.getChipRevision());
     Serial.println(F("---------------------------------------------------"));
-}
 
+}
 // =====================================================
 // Setup
 // =====================================================
+
+void vTaskDisplayInit(void *pvParameters) {
+  
+  vTaskDelay(pdMS_TO_TICKS(100)); //tempo para o setup() configurar os perifericos
+  int           tempoStart = 60;
+  uint32_t ultimoDisplayMs = 0;
+  uint32_t ultimoCoracaoMs = 0;
+  bool        exibeCoracao = false; // Controla se o coração aparece ou não
+
+  while (tempoStart > 0) {
+    // Bloqueia a tarefa por 500ms, liberando a CPU
+    vTaskDelay(pdMS_TO_TICKS(500)); 
+
+    // Gera pulso para Hardware Watchdog externo (10ms)
+    digitalWrite(HEARTBEAT_PIN, HIGH);
+    delayMicroseconds(10000);  // 10ms de pulso
+    digitalWrite(HEARTBEAT_PIN, LOW);
+
+    // Atualiza o estado do pisca (ocorre a cada 500ms garantidos)
+    exibeCoracao = !exibeCoracao;
+
+    // A cada duas iterações de 500ms, decrementa 1 segundo do tempo de início
+    static bool alternaSegundo = false;
+    alternaSegundo = !alternaSegundo;
+
+    if (alternaSegundo) {
+        ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
+        rtc_wdt_feed();
+        ESP_LOGD(TAG_WDT, "Watchdog alimentado");
+        tempoStart--;
+    }
+
+    if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+            display.clearDisplay();
+            
+            // Cabeçalho da Empresa
+            display.setTextSize(2);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(45, 10);
+            display.println("R&M");
+            display.setTextSize(1);
+            display.setCursor(42, 30);
+            display.println("Company");
+            
+            // Informações de Diagnóstico
+            display.setCursor(5, 55);
+            display.print("RST:");
+            display.println(gRun.counterRST);
+            display.setCursor(70, 55);
+            display.print("FW:");
+            display.println(BLYNK_FIRMWARE_VERSION);
+
+            // Contador de Inicialização
+            display.setTextSize(2);
+            display.setCursor(96, 24);
+            display.print(tempoStart);
+
+            if (exibeCoracao) {
+            // Batida alta: Desenha o coração cheio na posição original
+            display.setCursor(96, 3);
+            display.write(3); 
+            } else {
+            // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
+            display.setCursor(96, 3);
+            display.print(" ");
+            }
+            
+            display.display();
+            xSemaphoreGive(mtxI2C);
+        }
+  }
+    //  Ao finalizar os 60 segundos, deleta a task para liberar memória
+    //  removeer o comentário abaixo se quiser que a task seja deletada 
+    //  mas ele precisa ser criada no setup() com xTaskCreate() e não chamado diretamente como está sendo feito
+    //vTaskDelete(NULL);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -453,95 +530,50 @@ void setup() {
   esp_reset_reason_t reason = esp_reset_reason();
   ESP_LOGI(TAG_WDT, "Reset reason: %d - %s", reason, resetReasonName(reason));
 
-  // Configura o GPIO do LED Heartbeat
+  // =====================================================
+  // Inicializa Hardware Watchdog (Heartbeat Pin)
+  // =====================================================
   pinMode(HEARTBEAT_PIN, OUTPUT);
+  digitalWrite(HEARTBEAT_PIN, LOW);
+  
+  // Gera 3 pulsos de confirmação (boot handshake)
+  ESP_LOGI(TAG_WDT, "Iniciando Hardware Watchdog - Gerando pulsos de boot");
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(HEARTBEAT_PIN, HIGH);
+    delayMicroseconds(10000);  // 10ms de pulso
+    digitalWrite(HEARTBEAT_PIN, LOW);
+    delay(200);
+  }
+  ESP_LOGI(TAG_WDT, "Hardware Watchdog iniciado - Pulsos de boot OK");
 
   // --- NOVA LÓGICA DE TEMPORIZAÇÃO ASSÍNCRONA DE INICIALIZAÇÃO (60s) ---
   ESP_LOGI(TAG_MAIN, "Temporizando inicio do sistema");
-  
-  int tempoStart = 60;
-  uint32_t tempoZeroMs = millis();
-  uint32_t ultimoHeartbeatMs = 0;
-  uint32_t ultimoDisplayMs = 0;
-  bool heartBeat = false;
 
-  while (tempoStart >= 0) {
-    uint32_t currentMs = millis();
-    rtc_wdt_feed(); // Alimenta o Watchdog do RTC/Sistema
-
-    // Atualiza o Heartbeat Físico a cada 500ms
-    if (currentMs - ultimoHeartbeatMs >= 500) {
-      ultimoHeartbeatMs = currentMs;
-      heartBeat = !heartBeat;
-      digitalWrite(HEARTBEAT_PIN, heartBeat);
-    }
-
-    // Atualiza a contagem regressiva e a tela a cada 1000ms (1 segundo)
-    if (currentMs - ultimoDisplayMs >= 1000) {
-      ultimoDisplayMs = currentMs;
-      ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
-
-      if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
-        display.clearDisplay();
-        
-        // Cabeçalho da Empresa
-        display.setTextSize(2);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(45, 10);
-        display.println("R&M");
-        display.setTextSize(1);
-        display.setCursor(42, 30);
-        display.println("Company");
-        
-        // Informações de Diagnóstico
-        display.setCursor(5, 55);
-        display.print("RST:");
-        display.println(gRun.counterRST);
-        display.setCursor(70, 55);
-        display.print("FW:");
-        display.println(BLYNK_FIRMWARE_VERSION);
-
-        // Contador de Inicialização
-        display.setTextSize(2);
-        display.setCursor(96, 24);
-        display.print(tempoStart);
-
-        if (heartBeat) {
-          // Batida alta: Desenha o coração cheio na posição original
-          display.setCursor(96, 3);
-          display.write(3); 
-        } else {
-          // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
-          display.setCursor(96, 3);
-          display.print(" "); 
-        }
-        
-        display.display();
-        xSemaphoreGive(mtxI2C);
-      }
-
-      tempoStart--; // Decrementa o segundo
-    }
-
-    // Evita o travamento total da CPU 0/1 permitindo que o IDF processe background tasks
-    delay(10); 
-  }
+  // Executa o display init de forma síncrona (bloqueando pelo tempoStart)
+  vTaskDisplayInit(NULL);
 
   restoreMotorState(memMotorState);
 
   // Inicializa Serial Modbus/Hardware Secundário
   Serial1.begin(9600, SERIAL_8N1, 14, 27);
 
-  // Inicializa RTC Externo
-  if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+// Inicializa RTC Externo
+  // Define um timeout de 100 milissegundos em vez de esperar para sempre
+  if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
     bool rtcOk = RTC.begin();
-    xSemaphoreGive(mtxI2C);
+    xSemaphoreGive(mtxI2C); // Libera o semáforo imediatamente após o uso
+    
     if (!rtcOk) {
       ESP_LOGE(TAG_RTC, "Nao foi possivel encontrar o RTC DS1307");
       failMSG("FALHA RTC");
     } else {
       ESP_LOGI(TAG_RTC, "RTC DS1307 identificado com sucesso");
     }
+  } 
+  else {
+    // TRATAMENTO DE ERRO: O que acontece se o display prender o I2C por mais de 500ms
+    ESP_LOGE(TAG_RTC, "Timeout: Nao foi possivel obter o semaforo mtxI2C para inicializar o RTC");
+    failMSG("TIMEOUT I2C");
   }
 
   // Inicializa Sincronismo NTP
@@ -810,8 +842,18 @@ void TaskRTC(void *pv)
     if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
       now = RTC.now();
       xSemaphoreGive(mtxI2C);
+      // Limpa flag de erro se conseguiu ler o RTC
+      if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gRun.rtcError = false;
+        xSemaphoreGive(mtxData);
+      }
     } else {
       ESP_LOGW(TAG_RTC, "Timeout ao acessar I2C para leitura do RTC");
+      // Sinaliza erro
+      if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gRun.rtcError = true;
+        xSemaphoreGive(mtxData);
+      }
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
@@ -1152,8 +1194,6 @@ void TaskDisplay(void *pv)
 {
   LOG_TASK_START(TAG_DISPLAY);
 
-  // Configura o GPIO 23 como saída
-  pinMode(HEARTBEAT_PIN, OUTPUT);
   // Variável estática para guardar o segundo da última atualização válida
   static int ultimoSegundo = -1;
   // Tornar a variável static para manter o estado entre os loops
@@ -1206,9 +1246,6 @@ void TaskDisplay(void *pv)
         // Se a atualização foi motivada pelo tempo (500ms), invertemos o coração
         if (meioSegundoPassou) {
           heartBeat = !heartBeat; // Inverte o estado do heartBeat
-
-          // saida para o Hardware Heartbeat
-          digitalWrite(HEARTBEAT_PIN, heartBeat);   // ---   PISCA O LED FÍSICO   ---
           ultimoHeartbeatMs = millis();             // Reseta o cronômetro do heartbeat
         }
 
@@ -1303,6 +1340,8 @@ void TaskModbus(void *pv) {
 
   ESP_LOGI(TAG_MODBUS, "RS485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
 
+  static bool lastModbusError = false;  // Rastreia o estado anterior do erro
+
   for (;;) {
     lastAliveModbus = millis();
 
@@ -1340,14 +1379,28 @@ void TaskModbus(void *pv) {
       mb.pS   = reg[7] / 1000.00;
       mb.pT   = reg[8] / 1000.00;
 
-      ESP_LOGI(TAG_MODBUS,
+      // imprime os valores lidos no log para monitoramento
+      ESP_LOGD(TAG_MODBUS,
                "RS485 OK | V %.2f %.2f %.2f | I %.2f %.2f %.2f | P %.2f %.2f %.2f",
                mb.vR, mb.vS, mb.vT,
                mb.iR, mb.iS, mb.iT,
                mb.pR, mb.pS, mb.pT);
+      
+      // Se estava em erro e agora voltou ao normal, envia log uma vez
+      if (lastModbusError) {
+        queueLogf("RS485 restaurado com sucesso");
+        ESP_LOGI(TAG_MODBUS, "RS485 restaurado");
+        lastModbusError = false;
+      }
     } else {
       // O ModbusError(err).toStr() converte o código hexadecimal em uma string legível (ex: "TIMEOUT")
       ESP_LOGW(TAG_MODBUS, "Falha leitura RS485. Erro: %s", (const char *)ModbusError(err));
+      
+      // Envia log apenas na primeira vez que o erro ocorre
+      if (!lastModbusError) {
+        queueLogf("RS485 em falha: %s", (const char *)ModbusError(err));
+        lastModbusError = true;
+      }
     }
 
     // Gravação segura dos dados tratados na struct global utilizando seu Semáforo
@@ -1367,68 +1420,101 @@ void TaskModbus(void *pv) {
 // Task Supervisor - Core 0
 // =====================================================
 
-void TaskSupervisor(void *pv)
-{
-  LOG_TASK_START(TAG_SUPERVISOR);
+void TaskSupervisor(void *pv) {
+   LOG_TASK_START(TAG_SUPERVISOR);
 
-  for (;;) {
-    uint32_t now = millis();
+   // Configura o GPIO do LED Heartbeat
+   pinMode(HEARTBEAT_PIN, OUTPUT);
 
-    bool ok =
-      (now - lastAliveBlynk   < 60000UL) &&
-      (now - lastAliveIO      < 10000UL) &&
-      (now - lastAliveRTC     < 10000UL) &&
-      (now - lastAliveDisplay < 15000UL) &&
-      (now - lastAliveModbus  < 30000UL);
+   // Contador para controlar a checagem do Watchdog a cada 1 segundo
+   uint8_t ciclosWatchdog = 0; 
 
-    if (ok) {
-      rtc_wdt_feed();
-      ESP_LOGD(TAG_WDT, "Watchdog alimentado");
-    } else {
-      ESP_LOGE(TAG_WDT,
-               "Alguma task parou. WDT nao sera alimentado. Alive: Blynk=%lu IO=%lu RTC=%lu Display=%lu Modbus=%lu now=%lu",
-               (unsigned long)lastAliveBlynk,
-               (unsigned long)lastAliveIO,
-               (unsigned long)lastAliveRTC,
-               (unsigned long)lastAliveDisplay,
-               (unsigned long)lastAliveModbus,
-               (unsigned long)now);
-    }
+   for (;;) {
+      // Roda a cada 250ms - só faz a checagem a cada 4 ciclos (4 x 250ms = 1000ms = 1s)
+      ciclosWatchdog++;
+      if (ciclosWatchdog >= 4) {
+         ciclosWatchdog = 0; // Reseta o contador
 
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gRun.rssi = WiFi.RSSI();
-      gRun.temp = ((temprature_sens_read() - 32) / 1.8) -30;   // -30, era 28 para calibrar temperatura ambiente
+         uint32_t now = millis();
 
-      gRun.blynkState = BlynkState::get();
-      updateBlynkStateText(gRun.blynkState,
-                           gRun.blynkStateText,
-                           sizeof(gRun.blynkStateText));
+         // Verifica status do RTC
+         bool rtcError = false;
+         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+            rtcError = gRun.rtcError;
+            xSemaphoreGive(mtxData);
+         }
+         
+         if (rtcError) {
+            ESP_LOGE(TAG_WDT, "ERRO CRÍTICO: RTC não respondendo. WDT nao sera alimentado.");
+            queueLogf("Erro critico no RTC!");
+         }
 
-      xSemaphoreGive(mtxData);
-    } else {
-      ESP_LOGW(TAG_SUPERVISOR, "Timeout ao atualizar dados runtime");
-    }
+         bool ok = 
+            !rtcError &&
+            (now - lastAliveBlynk   < 60000UL) &&
+            (now - lastAliveIO      < 10000UL) &&
+            (now - lastAliveRTC     < 10000UL) &&
+            (now - lastAliveDisplay < 15000UL) &&
+            (now - lastAliveModbus  < 30000UL);
 
-    // Print de diagnóstico (temporizado ou esporádico).  USAR PARA DEBUG, NÃO DEIXAR ATIVO EM PRODUÇÃO
+         // Gera pulso de heartbeat (10ms) apenas quando sistema está saudável
+         if (ok) {
+            // Pulso curto (10ms) para hardware watchdog externo
+            digitalWrite(HEARTBEAT_PIN, HIGH);
+            delayMicroseconds(10000);  // 10ms de pulso
+            digitalWrite(HEARTBEAT_PIN, LOW);
+            
+            rtc_wdt_feed();
+            ESP_LOGD(TAG_WDT, "Watchdog alimentado - Pulso OK (10ms)");
+         } else {
+            // Mantém LOW se houver erro
+            digitalWrite(HEARTBEAT_PIN, LOW);
+            
+            ESP_LOGE(TAG_WDT,
+               "ERRO: Task timeout! Blynk:%lums IO:%lums RTC:%lums Display:%lums Modbus:%lums | RtcError=%d",
+               (unsigned long)(now - lastAliveBlynk),
+               (unsigned long)(now - lastAliveIO),
+               (unsigned long)(now - lastAliveRTC),
+               (unsigned long)(now - lastAliveDisplay),
+               (unsigned long)(now - lastAliveModbus),
+               rtcError);
 
-    // --- Executa também o relatório de monitoramento de memória ---
-    /*
-    ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
-    if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %d B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
-    if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %d B", uxTaskGetStackHighWaterMark(taskIOHandle));
-    if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %d B", uxTaskGetStackHighWaterMark(taskRTCHandle));
-    if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %d B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
-    if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %d B", uxTaskGetStackHighWaterMark(taskModbusHandle));
-    ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
-    ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
-    */
-    //Se o log apontar valores muito baixos (ex: menores que 150-200 bytes): Aumente o valor do respectivo #define STACK_XXX
+            queueLogf("Erro critico - Task Supervisor!");
+         }
+
+         // A sua lógica do mtxData (BlynkState, Temp, RSSI) que está na linha 1398 
+         // também continuará rodando aqui de forma segura a cada 1 segundo.
+         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+            gRun.rssi = WiFi.RSSI();
+            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - 30;
+            gRun.blynkState = BlynkState::get();
+            updateBlynkStateText(gRun.blynkState, gRun.blynkStateText, sizeof(gRun.blynkStateText));
+            xSemaphoreGive(mtxData);
+         }
+		 
+			// Print de diagnóstico (temporizado ou esporádico).  USAR PARA DEBUG, NÃO DEIXAR ATIVO EM PRODUÇÃO
+
+			// --- Executa também o relatório de monitoramento de memória ---
+			/*
+			ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
+			if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %d B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
+			if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %d B", uxTaskGetStackHighWaterMark(taskIOHandle));
+			if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %d B", uxTaskGetStackHighWaterMark(taskRTCHandle));
+			if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %d B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
+			if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %d B", uxTaskGetStackHighWaterMark(taskModbusHandle));
+			ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
+			ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
+			*/
+			//Se o log apontar valores muito baixos (ex: menores que 150-200 bytes): Aumente o valor do respectivo #define STACK_XXX
     
-    //Se o log apontar valores muito altos constantemente (ex: sobrando 1500 bytes ou mais): Significa que a tarefa foi superdimensionada. 
-    //Você pode diminuir com segurança o respectivo #define STACK_XXX para liberar mais memória RAM (Heap) global para o sistema.
+			//Se o log apontar valores muito altos constantemente (ex: sobrando 1500 bytes ou mais): Significa que a tarefa foi superdimensionada. 
+			//Você pode diminuir com segurança o respectivo #define STACK_XXX para liberar mais memória RAM (Heap) global para o sistema.
     
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
+      }
+
+      // 3. Bloqueia a task por apenas 250ms em vez de 1000ms
+      vTaskDelay(pdMS_TO_TICKS(250)); 
+   }
 }
 
 // =====================================================
