@@ -249,6 +249,9 @@ void restoreMotorState(bool memMotorState);
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
 
+void travarRelogio();
+void destravarRelogio();
+
 // =====================================================
 // Blynk callbacks
 // =====================================================
@@ -675,12 +678,16 @@ void TaskBlynk(void *pv)
                             gCmd.forcaLiga = true;
                             xSemaphoreGive(mtxData);
                             //queueLogf("Comando LIGAR");
+                            // trava RTC no modo de espera para que o WDT reinicie o sistema
+                            //travarRelogio();
                             break;
 
                         case BTN_DESLIGA:
                             gCmd.forcaDesliga = true;
                             xSemaphoreGive(mtxData);
                             //queueLogf("Comando DESLIGAR");
+                            // destrava RTC
+                            //destravarRelogio();
                             break;
                     }
                 } else {
@@ -833,6 +840,7 @@ void TaskRTC(void *pv)
   // Mantemos a flag aqui, mas controlamos estritamente suas mudanças
   bool setRTCToday = false; 
   bool logBateriaEnviado = false; // Nova flag para evitar travar o ESP com logs infinitos
+  uint8_t lastRtcSecond = 0xFF;
 
   for (;;) {
     lastAliveRTC = millis();
@@ -842,9 +850,19 @@ void TaskRTC(void *pv)
     if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
       now = RTC.now();
       xSemaphoreGive(mtxI2C);
-      // Limpa flag de erro se conseguiu ler o RTC
+
+      uint8_t rtcSecond = now.second();
+      bool rtcSecondStalled = (lastRtcSecond != 0xFF && rtcSecond == lastRtcSecond);
+      lastRtcSecond = rtcSecond;
+
+      // Limpa flag de erro se conseguiu ler o RTC e os segundos continuam avançando
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-        gRun.rtcError = false;
+        if (rtcSecondStalled) {
+          gRun.rtcError = true;
+          ESP_LOGW(TAG_RTC, "RTC sem avanço de segundos: %u", rtcSecond);
+        } else {
+          gRun.rtcError = false;
+        }
         xSemaphoreGive(mtxData);
       }
     } else {
@@ -905,7 +923,7 @@ void TaskRTC(void *pv)
     }
 
      // Executa a calibração automática apenas se a flag for falsa
-    if (t.hour == 18 && t.min == 0 && !setRTCToday) {
+    if (t.hour == 5 && t.min == 0 && !setRTCToday) {
       // Só marca como feito se a função retornar 'true' (sucesso)
       if (setRTCFromNTP()) {
         queueLogf("Relógio calibrado automaticamente");
@@ -917,7 +935,7 @@ void TaskRTC(void *pv)
     }
 
     // Só reseta a flag se ela estiver marcada como true. Evita processamento inútil no minuto 5:01.
-    if (t.hour == 18 && t.min == 1 && setRTCToday) {
+    if (t.hour == 5 && t.min == 1 && setRTCToday) {
       setRTCToday = false; 
     }
 
@@ -1239,9 +1257,9 @@ void TaskDisplay(void *pv)
         if (t.min < 10) display.print('0');
         display.print(t.min);
         // Descomente abaixo se quiser exibir os segundos na tela também:
-        // display.print(":");
-        // if (t.sec < 10) display.print('0');
-        // display.print(t.sec);
+        display.print(":");
+        if (t.sec < 10) display.print('0');
+        display.print(t.sec);
 
         // Se a atualização foi motivada pelo tempo (500ms), invertemos o coração
         if (meioSegundoPassou) {
@@ -1249,6 +1267,8 @@ void TaskDisplay(void *pv)
           ultimoHeartbeatMs = millis();             // Reseta o cronômetro do heartbeat
         }
 
+        // imprime o coração apenas se o segundo mudou, para não sobrecarregar o display
+        /*
         if (heartBeat) {
           // Batida alta: Desenha o coração cheio na posição original
           display.setCursor(96, 3);
@@ -1258,6 +1278,7 @@ void TaskDisplay(void *pv)
           display.setCursor(96, 3);
           display.print(" "); 
         }
+        */
 
         // Temperatura
         display.setCursor(0, 50);
@@ -1338,7 +1359,7 @@ void TaskModbus(void *pv) {
   // Inicializa o cliente eModbus
   mbClient.begin(Serial1);
 
-  ESP_LOGI(TAG_MODBUS, "RS485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
+  ESP_LOGI(TAG_MODBUS, "RS-485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
 
   static bool lastModbusError = false;  // Rastreia o estado anterior do erro
 
@@ -1381,24 +1402,24 @@ void TaskModbus(void *pv) {
 
       // imprime os valores lidos no log para monitoramento
       ESP_LOGD(TAG_MODBUS,
-               "RS485 OK | V %.2f %.2f %.2f | I %.2f %.2f %.2f | P %.2f %.2f %.2f",
+               "RS-485 OK | V %.2f %.2f %.2f | I %.2f %.2f %.2f | P %.2f %.2f %.2f",
                mb.vR, mb.vS, mb.vT,
                mb.iR, mb.iS, mb.iT,
                mb.pR, mb.pS, mb.pT);
       
       // Se estava em erro e agora voltou ao normal, envia log uma vez
       if (lastModbusError) {
-        queueLogf("RS485 restaurado com sucesso");
-        ESP_LOGI(TAG_MODBUS, "RS485 restaurado");
+        queueLogf("R-485 restaurado com sucesso");
+        ESP_LOGI(TAG_MODBUS, "R-485 restaurado");
         lastModbusError = false;
       }
     } else {
       // O ModbusError(err).toStr() converte o código hexadecimal em uma string legível (ex: "TIMEOUT")
-      ESP_LOGW(TAG_MODBUS, "Falha leitura RS485. Erro: %s", (const char *)ModbusError(err));
+      ESP_LOGW(TAG_MODBUS, "Falha leitura R-485. Erro: %s", (const char *)ModbusError(err));
       
       // Envia log apenas na primeira vez que o erro ocorre
       if (!lastModbusError) {
-        queueLogf("RS485 em falha: %s", (const char *)ModbusError(err));
+        queueLogf("R-485 em falha: %s", (const char *)ModbusError(err));
         lastModbusError = true;
       }
     }
@@ -1451,11 +1472,11 @@ void TaskSupervisor(void *pv) {
 
          bool ok = 
             !rtcError &&
-            (now - lastAliveBlynk   < 120000UL) &&
-            (now - lastAliveIO      < 10000UL) &&
-            (now - lastAliveRTC     < 10000UL) &&
-            (now - lastAliveDisplay < 15000UL) &&
-            (now - lastAliveModbus  < 30000UL);
+            (now - lastAliveBlynk   < 180000UL) && // 3 minutos para Blynk, pois pode ficar sem conexão WiFi por mais tempo
+            (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO, pois é crítico para o controle do motor
+            (now - lastAliveRTC     < 10000UL) &&  // 10 segundos para RTC, pois é crítico para o controle do motor
+            (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display, pois é crítico para o feedback visual
+            (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus, pois é crítico para o controle do motor
 
          // Gera pulso de heartbeat (10ms) apenas quando sistema está saudável
          if (ok) {
@@ -1478,8 +1499,19 @@ void TaskSupervisor(void *pv) {
                (unsigned long)(now - lastAliveDisplay),
                (unsigned long)(now - lastAliveModbus),
                rtcError);
+            
+               // --- Identifica dinamicamente qual task travou ---
+            char tasksTravadas[64] = ""; // Buffer para guardar os nomes das tasks falhas
 
-            queueLogf("Erro critico - Task Supervisor!");
+            if (rtcError)                             strcat(tasksTravadas, "RTC_I2C! ");
+            if ((now - lastAliveBlynk)   >= 180000UL) strcat(tasksTravadas, "Blynk! ");
+            if ((now - lastAliveIO)      >= 10000UL)  strcat(tasksTravadas, "IO! ");
+            if ((now - lastAliveRTC)     >= 10000UL)  strcat(tasksTravadas, "RTC! ");
+            if ((now - lastAliveDisplay) >= 15000UL)  strcat(tasksTravadas, "Display! ");
+            if ((now - lastAliveModbus)  >= 30000UL)  strcat(tasksTravadas, "Modbus! ");
+
+            // Envia para o log remoto/fila especificando o culpado
+            queueLogf("Erro de timeout: %s", tasksTravadas);
          }
 
          // A sua lógica do mtxData (BlynkState, Temp, RSSI) que está na linha 1398 
@@ -1860,4 +1892,23 @@ void failMSG(String HW_status)
     ESP_LOGE(TAG_MAIN, "Sistema parado por seguranca: %s", HW_status.c_str());
     delay(5000);
   }
+}
+
+
+// Função para TRAVAR o relógio (ativa o bit Clock Halt)
+void travarRelogio() {
+  Wire.beginTransmission(0x68); // Endereço I2C padrão do DS1307
+  Wire.write(0x00);             // Aponta para o registrador 0x00 (Segundos)
+  Wire.write(0x80);             // Escreve 0x80 (atribui 1 ao bit CH e zera os segundos)
+  Wire.endTransmission();
+  Serial.println("Relógio TRAVADO.");
+}
+
+// Função para DESTRAVAR o relógio (desativa o bit Clock Halt)
+void destravarRelogio() {
+  Wire.beginTransmission(0x68);
+  Wire.write(0x00);             // Aponta para o registrador de segundos
+  Wire.write(0x00);             // Escreve 0x00 (zera o bit CH e limpa os segundos)
+  Wire.endTransmission();
+  Serial.println("Relógio DESTRAVADO.");
 }
