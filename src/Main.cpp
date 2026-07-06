@@ -207,28 +207,28 @@ int cicloON  = 0;
 int cicloOFF = 0;
 
 uint32_t lastAliveBlynk   = 0;
-uint32_t lastAliveIO      = 0;
 uint32_t lastAliveRTC     = 0;
-uint32_t lastAliveDisplay = 0;
 uint32_t lastAliveModbus  = 0;
+uint32_t lastAliveDisplay = 0;
+uint32_t lastAliveIO      = 0;
 
 // Variáveis globais para armazenar o tempo gasto (em microssegundos)
 volatile uint32_t tempoTaskBlynk   = 0;
-volatile uint32_t tempoTaskIO      = 0;
 volatile uint32_t tempoTaskRTC     = 0;
-volatile uint32_t tempoTaskDisplay = 0;
 volatile uint32_t tempoTaskModbus  = 0;
+volatile uint32_t tempoTaskDisplay = 0;
+volatile uint32_t tempoTaskIO      = 0;
 
 // =====================================================
 // Protótipos
 // =====================================================
 
 void TaskBlynk(void *pv);
-void TaskIOControl(void *pv);
-void TaskRTC(void *pv);
-void TaskDisplay(void *pv);
-void TaskModbus(void *pv);
 void TaskSupervisor(void *pv);
+void TaskRTC(void *pv);
+void TaskModbus(void *pv);
+void TaskDisplay(void *pv);
+void TaskIOControl(void *pv);
 
 void initRtcWdt();
 void failMSG(String HW_status);
@@ -378,7 +378,7 @@ void imprimirDiagnosticoSistema() {
 void vTaskDisplayInit(void *pvParameters) {
   
   vTaskDelay(pdMS_TO_TICKS(100)); //tempo para o setup() configurar os perifericos
-  int           tempoStart = 60;
+  int           tempoStart = 6;
   uint32_t ultimoDisplayMs = 0;
   uint32_t ultimoCoracaoMs = 0;
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
@@ -456,6 +456,7 @@ void setup() {
   delay(300);
 
   esp_log_level_set("*", ESP_LOG_INFO);
+
   ESP_LOGI(TAG_MAIN, "Inicializando firmware %s", BLYNK_FIRMWARE_VERSION);
   ESP_LOGI(TAG_MAIN, "Setup rodando no core %d", xPortGetCoreID());
 
@@ -591,11 +592,12 @@ void setup() {
   xTaskCreatePinnedToCore(TaskBlynk, "TaskBlynk", STACK_BLYNK, NULL, 3, &taskBlynkHandle, 1);
   
   // Tasks de Hardware/Controle: Rodam no Core 0 para não sofrerem interferência do Wi-Fi
-  xTaskCreatePinnedToCore(TaskIOControl, "TaskIOControl", STACK_IO_CONTROL, NULL, 4, &taskIOHandle, 0);
-  xTaskCreatePinnedToCore(TaskRTC, "TaskRTC", STACK_RTC, NULL, 3, &taskRTCHandle, 0);
-  xTaskCreatePinnedToCore(TaskDisplay, "TaskDisplay", STACK_DISPLAY, NULL, 1, &taskDisplayHandle, 0);
-  xTaskCreatePinnedToCore(TaskModbus, "TaskModbus", STACK_MODBUS, NULL, 2, &taskModbusHandle, 0);
+
   xTaskCreatePinnedToCore(TaskSupervisor, "TaskSupervisor", STACK_SUPERVISOR, NULL, 5, &taskSupervisorHandle, 0);
+  xTaskCreatePinnedToCore(TaskRTC,        "TaskRTC",        STACK_RTC,        NULL, 4, &taskRTCHandle,        0);
+  xTaskCreatePinnedToCore(TaskModbus,     "TaskModbus",     STACK_MODBUS,     NULL, 3, &taskModbusHandle,     0);
+  xTaskCreatePinnedToCore(TaskDisplay,    "TaskDisplay",    STACK_DISPLAY,    NULL, 2, &taskDisplayHandle,    0);
+  xTaskCreatePinnedToCore(TaskIOControl,  "TaskIOControl",  STACK_IO_CONTROL, NULL, 1, &taskIOHandle,         0);
 
   ESP_LOGI(TAG_MAIN, "----------------------- SETUP OK ---------------------------");
   LOG_HEAP(TAG_MAIN);
@@ -604,11 +606,13 @@ void setup() {
 void loop()
 {
   // Tarefa que mostra um diagnóstico de saude do ESP32 a cada 10 segundos, mas está comentada para não poluir o log
+  /*
   static uint32_t temporizadorDiagnostico = 0;
   if (millis() - temporizadorDiagnostico > 60000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
   vTaskDelay(pdMS_TO_TICKS(1)); 
+  */
   
-  //vTaskDelay(portMAX_DELAY); //coloca a tarefa do loop() em estado de bloqueio permanente 
+  vTaskDelay(portMAX_DELAY); //coloca a tarefa do loop() em estado de bloqueio permanente 
 }
 
 // =====================================================
@@ -848,18 +852,33 @@ void TaskRTC(void *pv)
     DateTime now;
 
     if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+      byte bytesRecebidos = Wire.requestFrom(0x68, 1);
+      if (bytesRecebidos == 0) {
+        xSemaphoreGive(mtxI2C);
+        if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+          gRun.rtcError = true;
+          xSemaphoreGive(mtxData);
+        }
+        ESP_LOGW(TAG_RTC, "RTC com barramento travado");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        continue;
+      }
+
       now = RTC.now();
       xSemaphoreGive(mtxI2C);
 
       uint8_t rtcSecond = now.second();
-      bool rtcSecondStalled = (lastRtcSecond != 0xFF && rtcSecond == lastRtcSecond);
+      bool rtcSecondsStopped = (lastRtcSecond != 0xFF && rtcSecond == lastRtcSecond);
       lastRtcSecond = rtcSecond;
 
       // Limpa flag de erro se conseguiu ler o RTC e os segundos continuam avançando
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (rtcSecondStalled) {
+        if (rtcSecondsStopped) {
           gRun.rtcError = true;
           ESP_LOGW(TAG_RTC, "RTC sem avanço de segundos: %u", rtcSecond);
+        } else if (now.year() < 2026) {
+          gRun.rtcError = true;
+          ESP_LOGW(TAG_RTC, "RTC com ano inválido: %d", now.year());
         } else {
           gRun.rtcError = false;
         }
@@ -1181,6 +1200,11 @@ void TaskIOControl(void *pv)
                (unsigned long)sch.horaDesligaSec,
                sch.diasSemana);
 
+      if (gRun.rtcError) {
+        ESP_LOGW(TAG_IO, "RTC com erro. Ignorando controle por agenda.");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        continue;
+      }
       if (diaAtivo && dentroHorario) {
         // Dentro do horário: DESLIGA
         for (; cicloOFF < 1; cicloOFF++) {
@@ -1474,7 +1498,7 @@ void TaskSupervisor(void *pv) {
             !rtcError &&
             (now - lastAliveBlynk   < 180000UL) && // 3 minutos para Blynk, pois pode ficar sem conexão WiFi por mais tempo
             (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO, pois é crítico para o controle do motor
-            (now - lastAliveRTC     < 10000UL) &&  // 10 segundos para RTC, pois é crítico para o controle do motor
+            (now - lastAliveRTC     < 50000UL) &&  // 50 segundos para RTC, pois é crítico para o controle do motor
             (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display, pois é crítico para o feedback visual
             (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus, pois é crítico para o controle do motor
 
@@ -1574,32 +1598,78 @@ void writeOutputPLC()
 
 void pulseLiga()
 {
+
   ESP_LOGI(TAG_IO, "Pulso LIGAR iniciado");
 
-  output_PLC &= ~(1 << 0);
-  writeOutputPLC();
+  while (true) {
+    bool barramentoOk = false;
 
-  vTaskDelay(pdMS_TO_TICKS(1000));
+    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+      byte bytesRecebidos = Wire.requestFrom(0x68, 1); // PCF_OUTPUT_ADDR, o endereço é 0x68 do RTC DS1307, apenas para testar se o barramento I2C está respondendo
+      xSemaphoreGive(mtxI2C);
+      // se não recebeu nenhum byte, significa que o barramento está travado, então não tenta enviar o pulso
+      if (bytesRecebidos == 0) {
+          barramentoOk = false;
+      } else {
+          barramentoOk = true;
+      }
+    }
 
-  output_PLC |= (1 << 0);
-  writeOutputPLC();
+    if (barramentoOk) {
 
-  ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado");
+      output_PLC &= ~(1 << 0);
+      writeOutputPLC();
+
+      vTaskDelay(pdMS_TO_TICKS(1000));
+
+      output_PLC |= (1 << 0);
+      writeOutputPLC();
+
+      ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado");
+
+      break;
+    }
+
+    ESP_LOGW(TAG_IO, "###  PFC OUTPUT BARRAMENTO TRAVADO - PULSO LIGAR  ###");
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
 }
 
 void pulseDesliga()
 {
   ESP_LOGI(TAG_IO, "Pulso DESLIGAR iniciado");
 
-  output_PLC &= ~(1 << 1);
-  writeOutputPLC();
+  while (true) {
+    bool barramentoOk = false;
 
-  vTaskDelay(pdMS_TO_TICKS(1000));
+    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+      byte bytesRecebidos = Wire.requestFrom(0x68, 1); // PCF_OUTPUT_ADDR, o endereço é 0x68 do RTC DS1307, apenas para testar se o barramento I2C está respondendo
+      xSemaphoreGive(mtxI2C);
 
-  output_PLC |= (1 << 1);
-  writeOutputPLC();
+      if (bytesRecebidos == 0) {
+          barramentoOk = false;
+      } else {
+          barramentoOk = true;
+      }
+    }
 
-  ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado");
+    if (barramentoOk) {
+
+      output_PLC &= ~(1 << 1);
+      writeOutputPLC();
+
+      vTaskDelay(pdMS_TO_TICKS(1000));
+
+      output_PLC |= (1 << 1);
+      writeOutputPLC();
+
+      ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado");
+      break;
+    }
+
+    ESP_LOGW(TAG_IO, "###  PFC OUTPUT BARRAMENTO TRAVADO - PULSO DESLIGAR  ###");
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
 }
 
 // =====================================================
