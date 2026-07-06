@@ -1596,81 +1596,98 @@ void writeOutputPLC()
   }
 }
 
-void pulseLiga()
-{
+void pulseLiga() {
+    ESP_LOGI(TAG_IO, "Pulso LIGAR iniciado");
+    
+    // Armazena o momento em que a validação começou
+    uint32_t tempoInicioOk = xTaskGetTickCount(); 
 
-  ESP_LOGI(TAG_IO, "Pulso LIGAR iniciado");
+    // O loop monitora o barramento durante a janela de 2 segundos
+    while (true) {
+        bool barramentoOk = false;
 
-  while (true) {
-    bool barramentoOk = false;
+        // Tenta pegar o semáforo
+        if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Testa o barramento
+            byte bytesRecebidos = Wire.requestFrom(0x68, 1); 
+            xSemaphoreGive(mtxI2C);
 
-    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
-      byte bytesRecebidos = Wire.requestFrom(0x68, 1); // PCF_OUTPUT_ADDR, o endereço é 0x68 do RTC DS1307, apenas para testar se o barramento I2C está respondendo
-      xSemaphoreGive(mtxI2C);
-      // se não recebeu nenhum byte, significa que o barramento está travado, então não tenta enviar o pulso
-      if (bytesRecebidos == 0) {
-          barramentoOk = false;
-      } else {
-          barramentoOk = true;
-      }
+            // Verifica se houve resposta física no I2C
+            if (bytesRecebidos > 0) {
+                barramentoOk = true;
+            }
+        }
+
+        // SE O BARRAMENTO FALHAR: Aborta o pulso imediatamente
+        if (!barramentoOk) {
+            ESP_LOGE(TAG_IO, "### FALHA CRÍTICA: BARRAMENTO TRAVADO. PULSO LIGAR ABORTADO! ###");
+            return; // Sai da função imediatamente, sem enviar o pulso e sem esperar mais
+        }
+
+        // Se o barramento passou no teste atual, verifica se já completou os 2 segundos de estabilidade
+        if ((xTaskGetTickCount() - tempoInicioOk) >= pdMS_TO_TICKS(2000)) {
+            // Executa o pulso LIGAR (bit 0) após os 2 segundos de sucesso contínuo
+            output_PLC &= ~(1 << 0);
+            writeOutputPLC();
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            output_PLC |= (1 << 0);
+            writeOutputPLC();
+            
+            ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado com sucesso");
+            break; // Sai do loop e finaliza a função normalmente
+        }
+
+        // Aguarda 100ms antes de fazer a próxima checagem dentro da janela de 2s
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
-
-    if (barramentoOk) {
-
-      output_PLC &= ~(1 << 0);
-      writeOutputPLC();
-
-      vTaskDelay(pdMS_TO_TICKS(1000));
-
-      output_PLC |= (1 << 0);
-      writeOutputPLC();
-
-      ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado");
-
-      break;
-    }
-
-    ESP_LOGW(TAG_IO, "###  PFC OUTPUT BARRAMENTO TRAVADO - PULSO LIGAR  ###");
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
 }
 
-void pulseDesliga()
-{
-  ESP_LOGI(TAG_IO, "Pulso DESLIGAR iniciado");
+void pulseDesliga() {
+    ESP_LOGI(TAG_IO, "Pulso DESLIGAR iniciado");
+    
+    // Armazena o momento em que a validação começou
+    uint32_t tempoInicioOk = xTaskGetTickCount(); 
 
-  while (true) {
-    bool barramentoOk = false;
+    // O loop agora serve apenas para monitorar o tempo de estabilização (2 segundos)
+    while (true) {
+        bool barramentoOk = false;
 
-    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
-      byte bytesRecebidos = Wire.requestFrom(0x68, 1); // PCF_OUTPUT_ADDR, o endereço é 0x68 do RTC DS1307, apenas para testar se o barramento I2C está respondendo
-      xSemaphoreGive(mtxI2C);
+        // Tenta pegar o semáforo
+        if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Testa o barramento
+            byte bytesRecebidos = Wire.requestFrom(0x68, 1); 
+            xSemaphoreGive(mtxI2C);
 
-      if (bytesRecebidos == 0) {
-          barramentoOk = false;
-      } else {
-          barramentoOk = true;
-      }
+            // Verifica se houve resposta física no I2C
+            if (bytesRecebidos > 0) {
+                barramentoOk = true;
+            }
+        }
+
+        // SE O BARRAMENTO FALHAR: Aborta o pulso imediatamente
+        if (!barramentoOk) {
+            ESP_LOGE(TAG_IO, "### FALHA CRÍTICA: BARRAMENTO TRAVADO. PULSO DESLIGAR ABORTADO! ###");
+            return; // Sai da função imediatamente, sem enviar o pulso e sem esperar mais
+        }
+
+        // Se o barramento passou no teste atual, verifica se já completou os 2 segundos de estabilidade
+        if ((xTaskGetTickCount() - tempoInicioOk) >= pdMS_TO_TICKS(2000)) {
+            // Executa o pulso DESLIGAR (bit 1) após os 2 segundos de sucesso contínuo
+            output_PLC &= ~(1 << 1);
+            writeOutputPLC();
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            output_PLC |= (1 << 1);
+            writeOutputPLC();
+            
+            ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado com sucesso");
+            break; // Sai do loop e finaliza a função normalmente
+        }
+
+        // Aguarda 100ms antes de fazer a próxima checagem dentro da janela de 2s
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
-
-    if (barramentoOk) {
-
-      output_PLC &= ~(1 << 1);
-      writeOutputPLC();
-
-      vTaskDelay(pdMS_TO_TICKS(1000));
-
-      output_PLC |= (1 << 1);
-      writeOutputPLC();
-
-      ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado");
-      break;
-    }
-
-    ESP_LOGW(TAG_IO, "###  PFC OUTPUT BARRAMENTO TRAVADO - PULSO DESLIGAR  ###");
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
 }
+
 
 // =====================================================
 // Logs para Serial via esp_log e para Blynk via fila
