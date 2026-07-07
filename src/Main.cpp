@@ -234,8 +234,8 @@ void initRtcWdt();
 void failMSG(String HW_status);
 
 void writeOutputPLC();
-void pulseLiga();
-void pulseDesliga();
+void pulseLiga(const char *motivo);
+void pulseDesliga(const char *motivo);
 
 void queueLogf(const char *fmt, ...);
 bool setRTCFromNTP();
@@ -377,8 +377,8 @@ void imprimirDiagnosticoSistema() {
 
 void vTaskDisplayInit(void *pvParameters) {
   
-  vTaskDelay(pdMS_TO_TICKS(100)); //tempo para o setup() configurar os perifericos
-  int           tempoStart = 6;
+  vTaskDelay(pdMS_TO_TICKS(100)); // tempo para o setup() configurar os perifericos
+  int           tempoStart = 150; // para dar tempo do wi-fi iniciar no roteador externo
   uint32_t ultimoDisplayMs = 0;
   uint32_t ultimoCoracaoMs = 0;
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
@@ -1153,16 +1153,14 @@ void TaskIOControl(void *pv)
     // Modo manual APP
     if (sch.remotoOuAgenda == 0) {
       if (cmd.forcaLiga) {
-        pulseLiga();
+        pulseLiga("APP");
         cicloOFF = 0;
-        queueLogf("Ligar pelo APP");
         ESP_LOGI(TAG_IO, "Pulso LIGAR executado pelo APP");
       }
 
       if (cmd.forcaDesliga) {
-        pulseDesliga();
+        pulseDesliga("APP");
         cicloON = 0;
-        queueLogf("Desligar pelo APP");
         ESP_LOGI(TAG_IO, "Pulso DESLIGAR executado pelo APP");
       }
     }
@@ -1208,17 +1206,15 @@ void TaskIOControl(void *pv)
       if (diaAtivo && dentroHorario) {
         // Dentro do horário: DESLIGA
         for (; cicloOFF < 1; cicloOFF++) {
-          pulseDesliga();
+          pulseDesliga("agendamento");
           cicloON = 0;
-          queueLogf("Desligar por agendamento");
           ESP_LOGI(TAG_IO, "Pulso DESLIGAR por agendamento");
         }
       } else {
         // Fora do horário: LIGA
         for (; cicloON < 1; cicloON++) {
-          pulseLiga();
+          pulseLiga("agendamento");
           cicloOFF = 0;
-          queueLogf("Ligar por agendamento");
           ESP_LOGI(TAG_IO, "Pulso LIGAR por agendamento");
         }
       }
@@ -1596,8 +1592,13 @@ void writeOutputPLC()
   }
 }
 
-void pulseLiga() {
-    ESP_LOGI(TAG_IO, "Pulso LIGAR iniciado");
+void pulseLiga(const char *motivo) {
+    if (motivo == NULL || motivo[0] == '\0') {
+        motivo = "local";  // "sem motivo";
+    }
+
+    //queueLogf("Pulso LIGAR solicitado (%s)", motivo);
+    ESP_LOGI(TAG_IO, "Pulso LIGAR iniciado. Motivo= %s", motivo);
     
     // Armazena o momento em que a validação começou
     uint32_t tempoInicioOk = xTaskGetTickCount(); 
@@ -1633,7 +1634,8 @@ void pulseLiga() {
             output_PLC |= (1 << 0);
             writeOutputPLC();
             
-            ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado com sucesso");
+            queueLogf("Pulso LIGAR por %s", motivo);
+            ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado com sucesso. Motivo= %s", motivo);
             break; // Sai do loop e finaliza a função normalmente
         }
 
@@ -1642,8 +1644,13 @@ void pulseLiga() {
     }
 }
 
-void pulseDesliga() {
-    ESP_LOGI(TAG_IO, "Pulso DESLIGAR iniciado");
+void pulseDesliga(const char *motivo) {
+    if (motivo == NULL || motivo[0] == '\0') {
+        motivo =  "local";  // "sem motivo";
+    }
+
+    //queueLogf("Pulso DESLIGAR solicitado (%s)", motivo);
+    ESP_LOGI(TAG_IO, "Pulso DESLIGAR iniciado. Motivo= %s", motivo);
     
     // Armazena o momento em que a validação começou
     uint32_t tempoInicioOk = xTaskGetTickCount(); 
@@ -1679,7 +1686,8 @@ void pulseDesliga() {
             output_PLC |= (1 << 1);
             writeOutputPLC();
             
-            ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado com sucesso");
+            queueLogf("Pulso DESLIGAR por %s", motivo);
+            ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado com sucesso. Motivo= %s", motivo);
             break; // Sai do loop e finaliza a função normalmente
         }
 
@@ -1874,11 +1882,11 @@ void restoreMotorState(bool memMotorState)
            memMotorState);
 
   if (memMotorState == false) {
-    pulseLiga();
+    pulseLiga("memória");
     cicloOFF = 0;
     ESP_LOGI(TAG_IO, "Motor ativado pela memoria");
   } else {
-    pulseDesliga();
+    pulseDesliga("memória");
     cicloON = 0;
     ESP_LOGI(TAG_IO, "Motor desativado pela memoria");
   }
