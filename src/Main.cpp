@@ -378,7 +378,7 @@ void imprimirDiagnosticoSistema() {
 void vTaskDisplayInit(void *pvParameters) {
   
   vTaskDelay(pdMS_TO_TICKS(100)); // tempo para o setup() configurar os perifericos
-  int           tempoStart = 6; // para dar tempo do wi-fi iniciar no roteador externo
+  int           tempoStart = 60; // para dar tempo do wi-fi iniciar no roteador externo
   uint32_t ultimoDisplayMs = 0;
   uint32_t ultimoCoracaoMs = 0;
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
@@ -775,6 +775,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
 
       Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
       Blynk.virtualWrite(V56, runCopy.valorAnalogico); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
+      Blynk.virtualWrite(V29, (~(output_PLC >> 2) & 0x01)); // Bit 2: rele 3/4 (0=ligado, 1=desligado)
 
       if (inputCopy.modoLocal) {
         Blynk.virtualWrite(V49, 0);
