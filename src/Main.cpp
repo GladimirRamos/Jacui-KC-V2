@@ -378,7 +378,7 @@ void imprimirDiagnosticoSistema() {
 void vTaskDisplayInit(void *pvParameters) {
   
   vTaskDelay(pdMS_TO_TICKS(100)); // tempo para o setup() configurar os perifericos
-  int           tempoStart = 150; // para dar tempo do wi-fi iniciar no roteador externo
+  int           tempoStart = 6; // para dar tempo do wi-fi iniciar no roteador externo
   uint32_t ultimoDisplayMs = 0;
   uint32_t ultimoCoracaoMs = 0;
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
@@ -700,28 +700,39 @@ void TaskBlynk(void *pv)
             }
         }
 
-    // Envia logs da fila para o Blynk adicionando Data e Hora
-    while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
-            char logComTimestamp[150]; // Buffer para armazenar o log final com o tempo
-            
-            // Captura o tempo atual do sistema (usando a struct tm padrão do ESP32)
-            struct tm timeinfo;
-            if (getLocalTime(&timeinfo)) {
-                // Formata a data e hora idêntico ao resetMsg (ex: [24/06/2026 17:55:01] )
-                strftime(logComTimestamp, sizeof(logComTimestamp), "%d.%m.%Y - %H:%M:%S ", &timeinfo);
-            } else {
-                // Caso o RTC falhe por algum motivo, põe um indicador genérico
-                strcpy(logComTimestamp, "00.00.0000 - 00:00:00 ");
-            }
-            
-            // Concatena o texto original do log que veio da fila
-            strncat(logComTimestamp, logMsg.text, sizeof(logComTimestamp) - strlen(logComTimestamp) - 1);
-            
-            // Envia para o pino virtual do Terminal/Log no Blynk
-            Blynk.virtualWrite(V45, logComTimestamp);
-        }
+// Envia logs da fila para o Blynk adicionando Data e Hora
+while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
+    char logComTimestamp[150]; // Buffer para armazenar o log final com o tempo
+    SystemTimeData timeCopy;
+    bool rtcValido = false;
 
-    // Envio rápido a cada 5 segundos
+    // 1. Copia a struct global de tempo de forma segura usando o Mutex
+    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
+        timeCopy = gTime;
+        // Aproveita o Mutex para checar se o RTC está saudável (sem erro)
+        if (!gRun.rtcError) {
+            rtcValido = true;
+        }
+        xSemaphoreGive(mtxData);
+    }
+
+    // 2. Monta o timestamp baseado na validação do RTC
+    if (rtcValido) {
+        // Usa a string formatada "DD.MM.AAAA - HH:MM:SS" que a TaskRTC já gerou
+        snprintf(logComTimestamp, sizeof(logComTimestamp), "%s ", timeCopy.rtcText);
+    } else {
+        // Caso o RTC esteja com erro ou travado, põe o indicador genérico
+        snprintf(logComTimestamp, sizeof(logComTimestamp), "00.00.0000 - 00:00:00 ");
+    }
+    
+    // 3. Concatena o texto original do log que veio da fila
+    strncat(logComTimestamp, logMsg.text, sizeof(logComTimestamp) - strlen(logComTimestamp) - 1);
+    
+    // 4. Envia para o pino virtual do Terminal/Log no Blynk
+    Blynk.virtualWrite(V45, logComTimestamp);
+}
+
+    // Envio rápido a cada 1000 milisegundos
     if (now - lastSendFast >= 1000) {
       lastSendFast = now;
 
@@ -1111,11 +1122,11 @@ void TaskIOControl(void *pv)
     if (mbCopy.status == 0x00) { // Sensor OK
       double mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0;
 
-      if (mediaCorrente > 20.0) {
+      if (mediaCorrente < 20.0) {
         // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
         output_PLC &= ~(1 << 2); 
         output_PLC &= ~(1 << 3); 
-        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA > 20A. Relés 3 e 4 LIGADOS.", mediaCorrente);
+        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < 20A. Relés 3 e 4 LIGADOS.", mediaCorrente);
       } else {
         // Desliga Relé 3 e Relé 4 colocando em nível lógico ALTO (1 = Desligado)
         output_PLC |= (1 << 2);
@@ -1429,17 +1440,17 @@ void TaskModbus(void *pv) {
       
       // Se estava em erro e agora voltou ao normal, envia log uma vez
       if (lastModbusError) {
-        queueLogf("R-485 restaurado com sucesso");
-        ESP_LOGI(TAG_MODBUS, "R-485 restaurado");
+        queueLogf("RS-485 restaurado com sucesso");
+        ESP_LOGI(TAG_MODBUS, "RS-485 restaurado");
         lastModbusError = false;
       }
     } else {
       // O ModbusError(err).toStr() converte o código hexadecimal em uma string legível (ex: "TIMEOUT")
-      ESP_LOGW(TAG_MODBUS, "Falha leitura R-485. Erro: %s", (const char *)ModbusError(err));
+      ESP_LOGW(TAG_MODBUS, "Falha leitura RS-485. Erro: %s", (const char *)ModbusError(err));
       
       // Envia log apenas na primeira vez que o erro ocorre
       if (!lastModbusError) {
-        queueLogf("R-485 em falha: %s", (const char *)ModbusError(err));
+        queueLogf("RS-485 em falha: %s", (const char *)ModbusError(err));
         lastModbusError = true;
       }
     }
