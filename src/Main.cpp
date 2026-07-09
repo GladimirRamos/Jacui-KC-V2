@@ -1438,7 +1438,7 @@ void TaskModbus(void *pv) {
       mb.pT   = reg[8] / 1000.00;
 
       // imprime os valores lidos no log para monitoramento
-      ESP_LOGD(TAG_MODBUS,
+      ESP_LOGI(TAG_MODBUS,
                "RS-485 OK | V %.2f %.2f %.2f | I %.2f %.2f %.2f | P %.2f %.2f %.2f",
                mb.vR, mb.vS, mb.vT,
                mb.iR, mb.iS, mb.iT,
