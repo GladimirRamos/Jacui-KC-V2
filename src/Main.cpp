@@ -14,8 +14,13 @@
 
  *************************************************************/
 
-#define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
-#define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
+//#define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
+//#define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
+
+#define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
+#define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
+//#define BLYNK_AUTH_TOKEN       "ZIa5YqtRVSxMqyvlsIfdR0FcmuOj6KDb"
+
 #define BLYNK_FIRMWARE_VERSION "0.1.0"
 
 #define USE_ESP32_DEV_MODULE
@@ -68,7 +73,7 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
 #define PCF_OUTPUT_ADDR  0x24
 #define OLED_ADDR        0x3C
 
-#define WDT_TIMEOUT      30000UL // 2 minutos = 120.000 ms (UL)
+#define WDT_TIMEOUT      120000UL // 2 minutos = 120.000 ms (UL)
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 RTC_DS1307 RTC;
@@ -1490,6 +1495,14 @@ void TaskSupervisor(void *pv) {
 
          uint32_t now = millis();
 
+         // 1. Captura o estado atual do Blynk para avaliar a saúde do sistema
+         State estadoBlynkAtual = BlynkState::get();
+         // Ignora o timeout se o Blynk estiver em modo de configuração/espera por Wi-Fi
+         //bool blynkEmConfiguracao = (estadoBlynkAtual == BlynkState::WAIT_CONFIG || estadoBlynkAtual == BlynkState::CONFIGURING);
+         // Nova linha para checar se ele já terminou tudo e está rodando online
+         bool blynkRodandoOnline = Blynk.connected();  // retorna true se o dispositivo estiver online e comunicando com o servidor Blynk
+
+
          // Verifica status do RTC
          bool rtcError = false;
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1502,13 +1515,14 @@ void TaskSupervisor(void *pv) {
             queueLogf("Erro critico no RTC!");
          }
 
+         // 2. Cálculo de Saúde (Incluindo a exceção para o Blynk em configuração)
          bool ok = 
             !rtcError &&
-            (now - lastAliveBlynk   < 180000UL) && // 3 minutos para Blynk, pois pode ficar sem conexão WiFi por mais tempo
-            (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO, pois é crítico para o controle do motor
-            (now - lastAliveRTC     < 50000UL) &&  // 50 segundos para RTC, pois é crítico para o controle do motor
-            (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display, pois é crítico para o feedback visual
-            (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus, pois é crítico para o controle do motor
+            (blynkRodandoOnline || (now - lastAliveBlynk < 180000UL)) && // Ignora timeout se Blynk nao estiver rodando ou respomndendo (3 minutos)
+            (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO
+            (now - lastAliveRTC     < 50000UL) &&  // 50 segundos para RTC
+            (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display
+            (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus
 
          // Gera pulso de heartbeat (10ms) apenas quando sistema está saudável
          if (ok) {
@@ -1524,21 +1538,21 @@ void TaskSupervisor(void *pv) {
             digitalWrite(HEARTBEAT_PIN, LOW);
             
             ESP_LOGE(TAG_WDT,
-               "ERRO: Task timeout! Blynk:%lums IO:%lums RTC:%lums Display:%lums Modbus:%lums | RtcError=%d",
+               "ERRO: Task timeout! Blynk:%lums IO:%lums RTC:%lums Display:%lums Modbus:%lums | RtcError=%d | Config=%d",
                (unsigned long)(now - lastAliveBlynk),
                (unsigned long)(now - lastAliveIO),
                (unsigned long)(now - lastAliveRTC),
                (unsigned long)(now - lastAliveDisplay),
                (unsigned long)(now - lastAliveModbus),
-               rtcError);
+               rtcError, blynkRodandoOnline);
             
-               // --- Identifica dinamicamente qual task travou ---
-            char tasksTravadas[64] = ""; // Buffer para guardar os nomes das tasks falhas
+            // --- Identifica dinamicamente qual task travou ---
+            char tasksTravadas[64] = ""; 
 
             if (rtcError)                             strcat(tasksTravadas, "RTC_I2C! ");
-            if ((now - lastAliveBlynk)   >= 180000UL) strcat(tasksTravadas, "Blynk! ");
+            if (!blynkRodandoOnline && ((now - lastAliveBlynk) >= 180000UL)) strcat(tasksTravadas, "Blynk! ");
             if ((now - lastAliveIO)      >= 10000UL)  strcat(tasksTravadas, "IO! ");
-            if ((now - lastAliveRTC)     >= 10000UL)  strcat(tasksTravadas, "RTC! ");
+            if ((now - lastAliveRTC)     >= 50000UL)  strcat(tasksTravadas, "RTC! "); // Ajustado para bater com a condição de 50s acima
             if ((now - lastAliveDisplay) >= 15000UL)  strcat(tasksTravadas, "Display! ");
             if ((now - lastAliveModbus)  >= 30000UL)  strcat(tasksTravadas, "Modbus! ");
 
@@ -1546,37 +1560,29 @@ void TaskSupervisor(void *pv) {
             queueLogf("Erro de timeout: %s", tasksTravadas);
          }
 
-         // A sua lógica do mtxData (BlynkState, Temp, RSSI) que está na linha 1398 
-         // também continuará rodando aqui de forma segura a cada 1 segundo.
+         // 3. Atualização das variáveis globais de telemetria de forma segura
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
             gRun.rssi = WiFi.RSSI();
             gRun.temp = ((temprature_sens_read() - 32) / 1.8) - 30;
-            gRun.blynkState = BlynkState::get();
+            gRun.blynkState = estadoBlynkAtual; // Usa o estado coletado no início do ciclo
             updateBlynkStateText(gRun.blynkState, gRun.blynkStateText, sizeof(gRun.blynkStateText));
             xSemaphoreGive(mtxData);
          }
 		 
-			// Print de diagnóstico (temporizado ou esporádico).  USAR PARA DEBUG, NÃO DEIXAR ATIVO EM PRODUÇÃO
-
-			// --- Executa também o relatório de monitoramento de memória ---
-			/*
-			ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
-			if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %d B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
-			if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %d B", uxTaskGetStackHighWaterMark(taskIOHandle));
-			if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %d B", uxTaskGetStackHighWaterMark(taskRTCHandle));
-			if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %d B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
-			if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %d B", uxTaskGetStackHighWaterMark(taskModbusHandle));
-			ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
-			ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
-			*/
-			//Se o log apontar valores muito baixos (ex: menores que 150-200 bytes): Aumente o valor do respectivo #define STACK_XXX
-    
-			//Se o log apontar valores muito altos constantemente (ex: sobrando 1500 bytes ou mais): Significa que a tarefa foi superdimensionada. 
-			//Você pode diminuir com segurança o respectivo #define STACK_XXX para liberar mais memória RAM (Heap) global para o sistema.
-    
+         // --- Monitoramento de memória (Opcional para Debug) ---
+         /*
+         ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
+         if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %d B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
+         if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %d B", uxTaskGetStackHighWaterMark(taskIOHandle));
+         if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %d B", uxTaskGetStackHighWaterMark(taskRTCHandle));
+         if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %d B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
+         if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %d B", uxTaskGetStackHighWaterMark(taskModbusHandle));
+         ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
+         ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
+         */
       }
 
-      // 3. Bloqueia a task por apenas 250ms em vez de 1000ms
+      // Bloqueia a task por apenas 250ms
       vTaskDelay(pdMS_TO_TICKS(250)); 
    }
 }
