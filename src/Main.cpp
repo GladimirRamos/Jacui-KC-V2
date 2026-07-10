@@ -14,14 +14,13 @@
 
  *************************************************************/
 
-//#define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
-//#define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
+#define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
+#define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
 
-#define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
-#define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
-//#define BLYNK_AUTH_TOKEN       "ZIa5YqtRVSxMqyvlsIfdR0FcmuOj6KDb"
+//#define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
+//#define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
 
-#define BLYNK_FIRMWARE_VERSION "0.1.0"
+#define BLYNK_FIRMWARE_VERSION "0.1.2"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23
@@ -892,17 +891,17 @@ void TaskRTC(void *pv)
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
         if (rtcSecondsStopped) {
           gRun.rtcError = true;
-          ESP_LOGW(TAG_RTC, "RTC sem avanço de segundos: %u", rtcSecond);
+          ESP_LOGI(TAG_RTC, "RTC sem avanço de segundos: %u", rtcSecond);
         } else if (now.year() < 2026) {
           gRun.rtcError = true;
-          ESP_LOGW(TAG_RTC, "RTC com ano inválido: %d", now.year());
+          ESP_LOGI(TAG_RTC, "RTC com ano inválido: %d", now.year());
         } else {
           gRun.rtcError = false;
         }
         xSemaphoreGive(mtxData);
       }
     } else {
-      ESP_LOGW(TAG_RTC, "Timeout ao acessar I2C para leitura do RTC");
+      ESP_LOGI(TAG_RTC, "Timeout ao acessar I2C para leitura do RTC");
       // Sinaliza erro
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
         gRun.rtcError = true;
@@ -1438,11 +1437,13 @@ void TaskModbus(void *pv) {
       mb.pT   = reg[8] / 1000.00;
 
       // imprime os valores lidos no log para monitoramento
+      /*
       ESP_LOGI(TAG_MODBUS,
                "RS-485 OK | V %.2f %.2f %.2f | I %.2f %.2f %.2f | P %.2f %.2f %.2f",
                mb.vR, mb.vS, mb.vT,
                mb.iR, mb.iS, mb.iT,
                mb.pR, mb.pS, mb.pT);
+      */
       
       // Se estava em erro e agora voltou ao normal, envia log uma vez
       if (lastModbusError) {
@@ -1497,8 +1498,11 @@ void TaskSupervisor(void *pv) {
 
          // 1. Captura o estado atual do Blynk para avaliar a saúde do sistema
          State estadoBlynkAtual = BlynkState::get();
-         // Ignora o timeout se o Blynk estiver em modo de configuração/espera por Wi-Fi
-         //bool blynkEmConfiguracao = (estadoBlynkAtual == BlynkState::WAIT_CONFIG || estadoBlynkAtual == BlynkState::CONFIGURING);
+         // Ignora falha de RTC enquanto Blynk estiver em configuração/espera por Wi-Fi
+         uint32_t estadoBlynkNum = (uint32_t)estadoBlynkAtual;
+         bool blynkEmConfiguracao =
+          (estadoBlynkNum == 0 ||  // WAIT CONFIG
+           estadoBlynkNum == 1);   // CONFIG
          // Nova linha para checar se ele já terminou tudo e está rodando online
          bool blynkRodandoOnline = Blynk.connected();  // retorna true se o dispositivo estiver online e comunicando com o servidor Blynk
 
@@ -1509,15 +1513,17 @@ void TaskSupervisor(void *pv) {
             rtcError = gRun.rtcError;
             xSemaphoreGive(mtxData);
          }
+
+        bool rtcErrorEfetivo = rtcError && !blynkEmConfiguracao;
          
-         if (rtcError) {
+        if (rtcErrorEfetivo) {
             ESP_LOGE(TAG_WDT, "ERRO CRÍTICO: RTC não respondendo. WDT nao sera alimentado.");
             queueLogf("Erro critico no RTC!");
          }
 
          // 2. Cálculo de Saúde (Incluindo a exceção para o Blynk em configuração)
          bool ok = 
-            !rtcError &&
+          !rtcErrorEfetivo &&
             (blynkRodandoOnline || (now - lastAliveBlynk < 180000UL)) && // Ignora timeout se Blynk nao estiver rodando ou respomndendo (3 minutos)
             (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO
             (now - lastAliveRTC     < 50000UL) &&  // 50 segundos para RTC
@@ -1538,18 +1544,18 @@ void TaskSupervisor(void *pv) {
             digitalWrite(HEARTBEAT_PIN, LOW);
             
             ESP_LOGE(TAG_WDT,
-               "ERRO: Task timeout! Blynk:%lums IO:%lums RTC:%lums Display:%lums Modbus:%lums | RtcError=%d | Config=%d",
+              "ERRO: Task timeout! Blynk:%lums IO:%lums RTC:%lums Display:%lums Modbus:%lums | RtcError=%d | Config=%d",
                (unsigned long)(now - lastAliveBlynk),
                (unsigned long)(now - lastAliveIO),
                (unsigned long)(now - lastAliveRTC),
                (unsigned long)(now - lastAliveDisplay),
                (unsigned long)(now - lastAliveModbus),
-               rtcError, blynkRodandoOnline);
+              rtcErrorEfetivo, blynkEmConfiguracao);
             
             // --- Identifica dinamicamente qual task travou ---
             char tasksTravadas[64] = ""; 
 
-            if (rtcError)                             strcat(tasksTravadas, "RTC_I2C! ");
+            if (rtcErrorEfetivo)                      strcat(tasksTravadas, "RTC_I2C! ");
             if (!blynkRodandoOnline && ((now - lastAliveBlynk) >= 180000UL)) strcat(tasksTravadas, "Blynk! ");
             if ((now - lastAliveIO)      >= 10000UL)  strcat(tasksTravadas, "IO! ");
             if ((now - lastAliveRTC)     >= 50000UL)  strcat(tasksTravadas, "RTC! "); // Ajustado para bater com a condição de 50s acima
@@ -1563,7 +1569,7 @@ void TaskSupervisor(void *pv) {
          // 3. Atualização das variáveis globais de telemetria de forma segura
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
             gRun.rssi = WiFi.RSSI();
-            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - 30;
+            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - 17;  // (-30 KC Levante, -17 KC Jacui) para compensar o offset do ESP32
             gRun.blynkState = estadoBlynkAtual; // Usa o estado coletado no início do ciclo
             updateBlynkStateText(gRun.blynkState, gRun.blynkStateText, sizeof(gRun.blynkStateText));
             xSemaphoreGive(mtxData);
