@@ -16,7 +16,7 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
@@ -59,6 +59,7 @@
 #include "ModbusClientRTU.h"
 #include "soc/rtc_wdt.h"
 #include "esp_log.h"
+#include "driver/rmt.h"
 #include <stdarg.h>
 
 // =====================================================
@@ -93,7 +94,15 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
 #define PCF_OUTPUT_ADDR  0x24
 #define OLED_ADDR        0x3C
 
-#define WDT_TIMEOUT      120000UL // 2 minutos = 120.000 ms (UL)
+
+/*Faixa prática recomendada para o tempo de timeout do WDT (Watchdog Timer):
+    Mais agressivo: 8000 a 10000 ms.
+    Equilibrado: 12000 a 15000 ms.
+    Conservador: 20000 ms.
+*/
+#define WDT_TIMEOUT       15000UL // 2 minutos = 120.000 ms (UL)
+#define HEARTBEAT_PULSE_US 20000U // 20ms
+#define HEARTBEAT_RMT_CHANNEL RMT_CHANNEL_0
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 RTC_DS1307 RTC;
@@ -153,6 +162,7 @@ typedef struct {
 } LogMessage;
 
 QueueHandle_t qLog = NULL;
+static bool heartbeatRmtReady = false;
 
 // =====================================================
 // Estruturas de dados compartilhados
@@ -257,6 +267,8 @@ void TaskIOControl(void *pv);
 
 void initRtcWdt();
 void failMSG(String HW_status);
+void initHeartbeatRmt();
+void sendHeartbeatPulse();
 
 void writeOutputPLC();
 void pulseLiga(const char *motivo);
@@ -400,6 +412,53 @@ void imprimirDiagnosticoSistema() {
 // Setup
 // =====================================================
 
+void initHeartbeatRmt() {
+  rmt_config_t config = {};
+  config.rmt_mode = RMT_MODE_TX;
+  config.channel = HEARTBEAT_RMT_CHANNEL;
+  config.gpio_num = (gpio_num_t)HEARTBEAT_PIN;
+  config.mem_block_num = 1;
+  config.clk_div = 80; // 1 tick = 1us
+  config.tx_config.loop_en = false;
+  config.tx_config.carrier_en = false;
+  config.tx_config.idle_output_en = true;
+  config.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
+
+  esp_err_t err = rmt_config(&config);
+  if (err != ESP_OK) {
+    heartbeatRmtReady = false;
+    ESP_LOGE(TAG_WDT, "Falha rmt_config no heartbeat: %s", esp_err_to_name(err));
+    return;
+  }
+
+  err = rmt_driver_install(HEARTBEAT_RMT_CHANNEL, 0, 0);
+  if (err != ESP_OK) {
+    heartbeatRmtReady = false;
+    ESP_LOGE(TAG_WDT, "Falha rmt_driver_install no heartbeat: %s", esp_err_to_name(err));
+    return;
+  }
+
+  heartbeatRmtReady = true;
+  ESP_LOGI(TAG_WDT, "Heartbeat via RMT inicializado no GPIO %d", HEARTBEAT_PIN);
+}
+
+void sendHeartbeatPulse() {
+  if (!heartbeatRmtReady) {
+    return;
+  }
+
+  rmt_item32_t pulse = {};
+  pulse.level0 = 1;
+  pulse.duration0 = HEARTBEAT_PULSE_US;
+  pulse.level1 = 0;
+  pulse.duration1 = 100;
+
+  esp_err_t err = rmt_write_items(HEARTBEAT_RMT_CHANNEL, &pulse, 1, true);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG_WDT, "Falha ao enviar pulso heartbeat via RMT: %s", esp_err_to_name(err));
+  }
+}
+
 void vTaskDisplayInit(void *pvParameters) {
   
   vTaskDelay(pdMS_TO_TICKS(100)); // tempo para o setup() configurar os perifericos
@@ -412,10 +471,8 @@ void vTaskDisplayInit(void *pvParameters) {
     // Bloqueia a tarefa por 500ms, liberando a CPU
     vTaskDelay(pdMS_TO_TICKS(500)); 
 
-    // Gera pulso para Hardware Watchdog externo (10ms)
-    digitalWrite(HEARTBEAT_PIN, HIGH);
-    delayMicroseconds(10000);  // 10ms de pulso
-    digitalWrite(HEARTBEAT_PIN, LOW);
+    // Gera pulso para Hardware Watchdog externo via RMT (20ms)
+    sendHeartbeatPulse();
 
     // Atualiza o estado do pisca (ocorre a cada 500ms garantidos)
     exibeCoracao = !exibeCoracao;
@@ -569,15 +626,12 @@ void setup() {
   // =====================================================
   // Inicializa Hardware Watchdog (Heartbeat Pin)
   // =====================================================
-  pinMode(HEARTBEAT_PIN, OUTPUT);
-  digitalWrite(HEARTBEAT_PIN, LOW);
+  initHeartbeatRmt();
   
   // Gera 3 pulsos de confirmação (boot handshake)
   ESP_LOGI(TAG_WDT, "Iniciando Hardware Watchdog - Gerando pulsos de boot");
   for (int i = 0; i < 3; i++) {
-    digitalWrite(HEARTBEAT_PIN, HIGH);
-    delayMicroseconds(10000);  // 10ms de pulso
-    digitalWrite(HEARTBEAT_PIN, LOW);
+    sendHeartbeatPulse();
     delay(200);
   }
   ESP_LOGI(TAG_WDT, "Hardware Watchdog iniciado - Pulsos de boot OK");
@@ -1510,8 +1564,8 @@ void TaskModbus(void *pv) {
 void TaskSupervisor(void *pv) {
    LOG_TASK_START(TAG_SUPERVISOR);
 
-   // Configura o GPIO do LED Heartbeat
-   pinMode(HEARTBEAT_PIN, OUTPUT);
+   // O pino agora é controlado pelo driver RMT (configurado no setupRMTWatchdog)
+   // Não é mais necessário usar pinMode(HEARTBEAT_PIN, OUTPUT) aqui.
 
    // Contador para controlar a checagem do Watchdog a cada 1 segundo
    uint8_t ciclosWatchdog = 0; 
@@ -1526,97 +1580,104 @@ void TaskSupervisor(void *pv) {
 
          // 1. Captura o estado atual do Blynk para avaliar a saúde do sistema
          State estadoBlynkAtual = BlynkState::get();
-         // Ignora falha de RTC enquanto Blynk estiver em configuração/espera por Wi-Fi
          uint32_t estadoBlynkNum = (uint32_t)estadoBlynkAtual;
-         bool blynkEmConfiguracao =
-          (estadoBlynkNum == 0 ||  // WAIT CONFIG
-           estadoBlynkNum == 1);   // CONFIG
-         // Nova linha para checar se ele já terminou tudo e está rodando online
-         bool blynkRodandoOnline = Blynk.connected();  // retorna true se o dispositivo estiver online e comunicando com o servidor Blynk
+         
+         // Ignora falha de RTC/Timeout enquanto Blynk estiver em configuração/espera por Wi-Fi
+         bool blynkEmConfiguracao = (estadoBlynkNum == 0 || estadoBlynkNum == 1); // WAIT CONFIG / CONFIG
+         bool blynkRodandoOnline  = Blynk.connected(); 
 
-
-         // Verifica status do RTC
+         // Verifica status do RTC de forma thread-safe
          bool rtcError = false;
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
             rtcError = gRun.rtcError;
             xSemaphoreGive(mtxData);
          }
 
-        bool rtcErrorEfetivo = rtcError && !blynkEmConfiguracao;
+         bool rtcErrorEfetivo = rtcError && !blynkEmConfiguracao;
          
-        if (rtcErrorEfetivo) {
+         if (rtcErrorEfetivo) {
             ESP_LOGE(TAG_WDT, "ERRO CRÍTICO: RTC não respondendo. WDT nao sera alimentado.");
             queueLogf("Erro critico no RTC!");
          }
 
-         // 2. Cálculo de Saúde (Incluindo a exceção para o Blynk em configuração)
+         // 2. Cálculo de Saúde isolado para evitar divergências nos logs
+         bool blynkSaudavel = blynkEmConfiguracao || blynkRodandoOnline || (now - lastAliveBlynk < 180000UL);
+
          bool ok = 
-          !rtcErrorEfetivo &&
-            (blynkRodandoOnline || (now - lastAliveBlynk < 180000UL)) && // Ignora timeout se Blynk nao estiver rodando ou respomndendo (3 minutos)
+            !rtcErrorEfetivo &&
+            blynkSaudavel &&
             (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO
             (now - lastAliveRTC     < 50000UL) &&  // 50 segundos para RTC
             (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display
             (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus
 
-         // Gera pulso de heartbeat (10ms) apenas quando sistema está saudável
+         // Gera pulso de heartbeat (20ms via RMT) apenas quando o sistema está saudável
          if (ok) {
-            // Pulso curto (10ms) para hardware watchdog externo
-            digitalWrite(HEARTBEAT_PIN, HIGH);
-            delayMicroseconds(10000);  // 10ms de pulso
-            digitalWrite(HEARTBEAT_PIN, LOW);
-            
+            sendHeartbeatPulse();
             rtc_wdt_feed();
-            ESP_LOGD(TAG_WDT, "Watchdog alimentado - Pulso OK (10ms)");
+            ESP_LOGD(TAG_WDT, "Watchdog alimentado - Pulso OK (20ms via RMT)");
          } else {
-            // Mantém LOW se houver erro
-            digitalWrite(HEARTBEAT_PIN, LOW);
+            // Se o sistema falhar, o hardware externo vai resetar o ESP32 (linhas do RMT ficam em LOW por padrão)
+            ESP_LOGE(TAG_WDT, "ERRO: Task timeout geral detectado! Analisando culpados:");
+
+            // Impressão individualizada e limpa por linhas no console
+            if (rtcErrorEfetivo) {
+               ESP_LOGE(TAG_WDT, "  -> ERRO: RTC_I2C sem resposta física");
+            }
+            if (!blynkSaudavel) {
+               ESP_LOGE(TAG_WDT, "  -> ERRO: Blynk timeout (%lums)", (unsigned long)(now - lastAliveBlynk));
+            }
+            if ((now - lastAliveIO) >= 10000UL) {
+               ESP_LOGE(TAG_WDT, "  -> ERRO: IO timeout (%lums)", (unsigned long)(now - lastAliveIO));
+            }
+            if ((now - lastAliveRTC) >= 50000UL) {
+               ESP_LOGE(TAG_WDT, "  -> ERRO: RTC task timeout (%lums)", (unsigned long)(now - lastAliveRTC));
+            }
+            if ((now - lastAliveDisplay) >= 15000UL) {
+               ESP_LOGE(TAG_WDT, "  -> ERRO: Display timeout (%lums)", (unsigned long)(now - lastAliveDisplay));
+            }
+            if ((now - lastAliveModbus) >= 30000UL) {
+               ESP_LOGE(TAG_WDT, "  -> ERRO: Modbus timeout (%lums)", (unsigned long)(now - lastAliveModbus));
+            }
             
-            ESP_LOGE(TAG_WDT,
-              "ERRO: Task timeout! Blynk:%lums IO:%lums RTC:%lums Display:%lums Modbus:%lums | RtcError=%d | Config=%d",
-               (unsigned long)(now - lastAliveBlynk),
-               (unsigned long)(now - lastAliveIO),
-               (unsigned long)(now - lastAliveRTC),
-               (unsigned long)(now - lastAliveDisplay),
-               (unsigned long)(now - lastAliveModbus),
-              rtcErrorEfetivo, blynkEmConfiguracao);
-            
-            // --- Identifica dinamicamente qual task travou ---
+            // --- Identifica dinamicamente as tasks para a telemetria remota com proteção de estouro ---
             char tasksTravadas[64] = ""; 
 
-            if (rtcErrorEfetivo)                      strcat(tasksTravadas, "RTC_I2C! ");
-            if (!blynkRodandoOnline && ((now - lastAliveBlynk) >= 180000UL)) strcat(tasksTravadas, "Blynk! ");
-            if ((now - lastAliveIO)      >= 10000UL)  strcat(tasksTravadas, "IO! ");
-            if ((now - lastAliveRTC)     >= 50000UL)  strcat(tasksTravadas, "RTC! "); // Ajustado para bater com a condição de 50s acima
-            if ((now - lastAliveDisplay) >= 15000UL)  strcat(tasksTravadas, "Display! ");
-            if ((now - lastAliveModbus)  >= 30000UL)  strcat(tasksTravadas, "Modbus! ");
+            if (rtcErrorEfetivo)                      strncat(tasksTravadas, "RTC_I2C! ", sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if (!blynkSaudavel)                       strncat(tasksTravadas, "Blynk! ",   sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - lastAliveIO)      >= 10000UL)  strncat(tasksTravadas, "IO! ",      sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - lastAliveRTC)     >= 50000UL)  strncat(tasksTravadas, "RTC! ",     sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - lastAliveDisplay) >= 15000UL)  strncat(tasksTravadas, "Display! ", sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - lastAliveModbus)  >= 30000UL)  strncat(tasksTravadas, "Modbus! ",  sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
 
-            // Envia para o log remoto/fila especificando o culpado
+            // Envia para o log remoto/fila especificando o culpado exato
             queueLogf("Erro de timeout: %s", tasksTravadas);
          }
 
          // 3. Atualização das variáveis globais de telemetria de forma segura
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
             gRun.rssi = WiFi.RSSI();
-            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - calTemp;  // (-30 KC Levante, -17 KC Jacui) para compensar o offset do ESP32
-            gRun.blynkState = estadoBlynkAtual; // Usa o estado coletado no início do ciclo
+            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - calTemp; 
+            gRun.blynkState = estadoBlynkAtual; 
             updateBlynkStateText(gRun.blynkState, gRun.blynkStateText, sizeof(gRun.blynkStateText));
             xSemaphoreGive(mtxData);
          }
 		 
-         // --- Monitoramento de memória (Opcional para Debug) ---
+         // --- Monitoramento de memória (Ativo para Debug) ---
          /*
          ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
-         if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %d B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
-         if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %d B", uxTaskGetStackHighWaterMark(taskIOHandle));
-         if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %d B", uxTaskGetStackHighWaterMark(taskRTCHandle));
-         if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %d B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
-         if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %d B", uxTaskGetStackHighWaterMark(taskModbusHandle));
+         if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %u B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
+         if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %u B", uxTaskGetStackHighWaterMark(taskIOHandle));
+         if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %u B", uxTaskGetStackHighWaterMark(taskRTCHandle));
+         if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %u B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
+         if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %u B", uxTaskGetStackHighWaterMark(taskModbusHandle));
          ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
          ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
          */
+
       }
 
-      // Bloqueia a task por apenas 250ms
+      // Bloqueia a task por 250ms liberando o processador
       vTaskDelay(pdMS_TO_TICKS(250)); 
    }
 }
