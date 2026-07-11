@@ -14,11 +14,32 @@
 
  *************************************************************/
 
-#define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
-#define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
+#ifdef CONFIG_JACUI
+  // 1ª Opção: Jacuí
+  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
+  #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
+  #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
 
-//#define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
-//#define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
+#elif defined(CONFIG_LEVANTE)
+  // 2ª Opção: Levante
+  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp = 30;              // Ajuste de calibração da temperatura interna do ESP32
+  #define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
+  #define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
+
+#elif defined(CONFIG_OPCAO3)
+  // 3ª Opção: Nova Opção (Altere os valores para o seu cenário)
+  int tempoStart = 6;            // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp = 17;              // Ajuste de calibração da temperatura interna do ESP32
+  #define BLYNK_TEMPLATE_ID      "TMPL333333333"
+  #define BLYNK_TEMPLATE_NAME    "Nova Opcao KC"
+
+#else
+  // Caso você esqueça de selecionar um ambiente válido
+  #error "Por favor, selecione um ambiente de compilação valido no arquivo PlatformIO.ini!"
+
+#endif
 
 #define BLYNK_FIRMWARE_VERSION "0.1.2"
 
@@ -382,7 +403,7 @@ void imprimirDiagnosticoSistema() {
 void vTaskDisplayInit(void *pvParameters) {
   
   vTaskDelay(pdMS_TO_TICKS(100)); // tempo para o setup() configurar os perifericos
-  int           tempoStart = 60; // para dar tempo do wi-fi iniciar no roteador externo
+  //int           tempoStart = 6;   // para dar tempo do wi-fi iniciar no roteador externo
   uint32_t ultimoDisplayMs = 0;
   uint32_t ultimoCoracaoMs = 0;
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
@@ -416,11 +437,16 @@ void vTaskDisplayInit(void *pvParameters) {
             // Cabeçalho da Empresa
             display.setTextSize(2);
             display.setTextColor(SSD1306_WHITE);
-            display.setCursor(45, 10);
+            display.setCursor(33, 5);             // XX, YYY (64, 128)
             display.println("R&M");
             display.setTextSize(1);
-            display.setCursor(42, 30);
+            display.setCursor(30, 23);
             display.println("Company");
+
+            // nome do BLYNK_TEMPLATE_NAME
+            display.setCursor(5, 40);
+            display.print("HW: ");
+            display.println(BLYNK_TEMPLATE_NAME);
             
             // Informações de Diagnóstico
             display.setCursor(5, 55);
@@ -432,18 +458,20 @@ void vTaskDisplayInit(void *pvParameters) {
 
             // Contador de Inicialização
             display.setTextSize(2);
-            display.setCursor(96, 24);
+            display.setCursor(88, 16);
             display.print(tempoStart);
 
+            /*
             if (exibeCoracao) {
             // Batida alta: Desenha o coração cheio na posição original
-            display.setCursor(96, 3);
+            display.setCursor(96, 0);
             display.write(3); 
             } else {
             // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
-            display.setCursor(96, 3);
+            display.setCursor(96, 0);
             display.print(" ");
             }
+            */
             
             display.display();
             xSemaphoreGive(mtxI2C);
@@ -1569,7 +1597,7 @@ void TaskSupervisor(void *pv) {
          // 3. Atualização das variáveis globais de telemetria de forma segura
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
             gRun.rssi = WiFi.RSSI();
-            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - 17;  // (-30 KC Levante, -17 KC Jacui) para compensar o offset do ESP32
+            gRun.temp = ((temprature_sens_read() - 32) / 1.8) - calTemp;  // (-30 KC Levante, -17 KC Jacui) para compensar o offset do ESP32
             gRun.blynkState = estadoBlynkAtual; // Usa o estado coletado no início do ciclo
             updateBlynkStateText(gRun.blynkState, gRun.blynkStateText, sizeof(gRun.blynkStateText));
             xSemaphoreGive(mtxData);
