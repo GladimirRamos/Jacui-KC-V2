@@ -16,7 +16,7 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
@@ -100,7 +100,7 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
     Equilibrado: 12000 a 15000 ms.
     Conservador: 20000 ms.
 */
-#define WDT_TIMEOUT       15000UL // 2 minutos = 120.000 ms (UL)
+#define WDT_TIMEOUT       16000UL // 2 minutos = 120.000 ms (UL)
 #define HEARTBEAT_PULSE_US 20000U // 20ms
 #define HEARTBEAT_RMT_CHANNEL RMT_CHANNEL_0
 
@@ -1083,7 +1083,7 @@ void TaskRTC(void *pv)
       gForceRtcWdtReset = true;
       
       // Inicializa o contador antes de entrar no loop de travamento
-      int32_t contador_travamento = WDT_TIMEOUT/1000; // Inicializa com o tempo de timeout em segundos
+      int32_t contador_travamento = (WDT_TIMEOUT/1000)-1; // Inicializa com o tempo de timeout em segundos
       TickType_t lastWake = xTaskGetTickCount();
 
       while (true)
@@ -1093,9 +1093,9 @@ void TaskRTC(void *pv)
 
         // Mostra o mesmo contador no log nativo do ESP32 (decrementa aqui ao final)
         ESP_LOGI(TAG_WDT, "RTC Watchdog vai atuar para reiniciar o sistema... Contador: %d", contador_travamento--);
-
+        /*
         // Sai do loop quando contador atingir 0, permitindo que o WDT dispare
-        if (contador_travamento < 0) {
+        if (contador_travamento == 0) {
           queueLogf("RTCWDT_RTC_RESET aguardando disparo...");
           ESP_LOGI(TAG_WDT, "RTC WDT sem feed: aguardando reset automatico");
           // Mantem scheduler ativo para nao acionar TASK_WDT.
@@ -1103,7 +1103,7 @@ void TaskRTC(void *pv)
             vTaskDelay(pdMS_TO_TICKS(250));
           }
         }
-
+        */
         // Periodicidade fixa de 1 segundo para evitar variacao visual no monitor serial.
         vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
       }
