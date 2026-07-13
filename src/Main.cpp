@@ -16,7 +16,7 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
@@ -152,7 +152,7 @@ TaskHandle_t taskSupervisorHandle = NULL;
 //Debug exception reason: Stack canary watchpoint triggered (TaskRTC) 
 #define STACK_DISPLAY      3584
 #define STACK_MODBUS       4096
-#define STACK_SUPERVISOR   2048
+#define STACK_SUPERVISOR   3072
 
 SemaphoreHandle_t mtxI2C  = NULL;
 SemaphoreHandle_t mtxData = NULL;
@@ -253,6 +253,7 @@ volatile uint32_t tempoTaskRTC     = 0;
 volatile uint32_t tempoTaskModbus  = 0;
 volatile uint32_t tempoTaskDisplay = 0;
 volatile uint32_t tempoTaskIO      = 0;
+volatile bool gForceRtcWdtReset    = false;
 
 // =====================================================
 // Protótipos
@@ -483,8 +484,10 @@ void vTaskDisplayInit(void *pvParameters) {
 
     if (alternaSegundo) {
         ESP_LOGI(TAG_MAIN, "Inicio em %d segundos", tempoStart);
-        rtc_wdt_feed();
-        ESP_LOGD(TAG_WDT, "Watchdog alimentado");
+        if (!gForceRtcWdtReset) {
+          rtc_wdt_feed();
+          ESP_LOGD(TAG_WDT, "Watchdog alimentado");
+        }
         tempoStart--;
     }
 
@@ -1074,13 +1077,35 @@ void TaskRTC(void *pv)
       queueLogf("Relógio calibrado por comando APP");
     }
 
-    if (doRestart) {
+   if (doRestart) {
       queueLogf("Reiniciando por comando APP");
       ESP_LOGW(TAG_RTC, "Reiniciando por comando APP");
+      gForceRtcWdtReset = true;
+      
+      // Inicializa o contador antes de entrar no loop de travamento
+      int32_t contador_travamento = WDT_TIMEOUT/1000; // Inicializa com o tempo de timeout em segundos
+      TickType_t lastWake = xTaskGetTickCount();
+
       while (true)
       {
-        ESP_LOGI(TAG_WDT, "RTC Watchdog vai atuar para reiniciar o sistema...");
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Evita que o Core do ESP trave sem alimentar o IDLE do RTOS
+        // Mostra o contador na sua função queueLogf
+        queueLogf("Sistema será reiniciado em: %d", contador_travamento);
+
+        // Mostra o mesmo contador no log nativo do ESP32 (decrementa aqui ao final)
+        ESP_LOGI(TAG_WDT, "RTC Watchdog vai atuar para reiniciar o sistema... Contador: %d", contador_travamento--);
+
+        // Sai do loop quando contador atingir 0, permitindo que o WDT dispare
+        if (contador_travamento < 0) {
+          queueLogf("RTCWDT_RTC_RESET aguardando disparo...");
+          ESP_LOGI(TAG_WDT, "RTC WDT sem feed: aguardando reset automatico");
+          // Mantem scheduler ativo para nao acionar TASK_WDT.
+          while (true) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+          }
+        }
+
+        // Periodicidade fixa de 1 segundo para evitar variacao visual no monitor serial.
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
       }
     }
 
@@ -1569,6 +1594,7 @@ void TaskSupervisor(void *pv) {
 
    // Contador para controlar a checagem do Watchdog a cada 1 segundo
    uint8_t ciclosWatchdog = 0; 
+  bool logForceResetJaEnviado = false;
 
    for (;;) {
       // Roda a cada 250ms - só faz a checagem a cada 4 ciclos (4 x 250ms = 1000ms = 1s)
@@ -1611,8 +1637,15 @@ void TaskSupervisor(void *pv) {
             (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display
             (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus
 
-         // Gera pulso de heartbeat (20ms via RMT) apenas quando o sistema está saudável
-         if (ok) {
+        // Em reset forçado, não alimente WDT e não execute diagnóstico pesado.
+        if (gForceRtcWdtReset) {
+          if (!logForceResetJaEnviado) {
+            ESP_LOGW(TAG_WDT, "Reset forcado ativo: Supervisor em modo passivo aguardando RTC WDT");
+            logForceResetJaEnviado = true;
+          }
+        }
+        // Gera pulso de heartbeat (20ms via RMT) apenas quando o sistema está saudável
+        else if (ok) {
             sendHeartbeatPulse();
             rtc_wdt_feed();
             ESP_LOGD(TAG_WDT, "Watchdog alimentado - Pulso OK (20ms via RMT)");
