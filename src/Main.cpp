@@ -900,8 +900,8 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       }
     }
 
-    // Envio Modbus a cada 10 segundos
-    if (now - lastSendSlow >= 10000) {
+    // Envio Modbus a cada 3 segundos
+    if (now - lastSendSlow >= 3000) {
       lastSendSlow = now;
 
       ModbusData mb;
@@ -1536,9 +1536,9 @@ void TaskModbus(void *pv) {
       mb.vR   = reg[0] / 100.00;
       mb.vS   = reg[1] / 100.00;
       mb.vT   = reg[2] / 100.00;
-      mb.iR   = (reg[3] / 100.00) - 10;
-      mb.iS   = (reg[4] / 100.00) - 5;
-      mb.iT   = (reg[5] / 100.00) - 7;
+      mb.iR   = (reg[3] / 100.00); // - 10;
+      mb.iS   = (reg[4] / 100.00); // - 5;
+      mb.iT   = (reg[5] / 100.00); // - 7;
       mb.pR   = reg[6] / 1000.00;
       mb.pS   = reg[7] / 1000.00;
       mb.pT   = reg[8] / 1000.00;
