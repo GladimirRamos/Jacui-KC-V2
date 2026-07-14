@@ -182,7 +182,7 @@ struct SystemTimeData {
 
 struct InputData {
   uint8_t raw;
-  bool motorOff;       // true = motor desligado
+  bool motorStatus;    // true = motor desligado
   bool modoLocal;      // true = modo local
 };
 
@@ -859,8 +859,8 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       Blynk.virtualWrite(V52, runCopy.temp);
       Blynk.virtualWrite(V53, runCopy.counterRST);
 
-      Blynk.virtualWrite(V44, inputCopy.motorOff ? 0 : 1);
-      Blynk.virtualWrite(V43, inputCopy.motorOff ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
+      Blynk.virtualWrite(V44, inputCopy.motorStatus ? 0 : 1);
+      Blynk.virtualWrite(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
       Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
       Blynk.virtualWrite(V56, runCopy.valorAnalogico); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
@@ -1151,7 +1151,7 @@ void TaskIOControl(void *pv)
         InputData in;
 
         in.raw       = inputPCF;
-        in.motorOff  = inputPCF & (1 << 0); // IN1
+        in.motorStatus  = inputPCF & (1 << 0); // IN1
         in.modoLocal = inputPCF & (1 << 1); // IN2
 
         // Leitura analógica do GPIO36 (Faixa nativa de 0 a 4095)
@@ -1187,20 +1187,20 @@ void TaskIOControl(void *pv)
         ESP_LOGD(TAG_IO,
                  "Entradas PCF=0x%02X Motor=%s Modo=%s",
                  inputPCF,
-                 in.motorOff ? "DESLIGADO" : "LIGADO",
+                 in.motorStatus ? "DESLIGADO" : "LIGADO",
                  in.modoLocal ? "LOCAL" : "APP");
 
         // Grava estado do motor somente quando muda
-        if (in.motorOff != oldMotorOff) {
+        if (in.motorStatus != oldMotorOff) {
           preferences.begin("my-app", false);
-          preferences.putBool("MemMotorState", in.motorOff);
+          preferences.putBool("MemMotorState", in.motorStatus);
           preferences.end();
 
-          oldMotorOff = in.motorOff;
+          oldMotorOff = in.motorStatus;
 
           ESP_LOGI(TAG_NVS,
                    "Estado motor gravado na NVS: %s",
-                   in.motorOff ? "DESLIGADO" : "LIGADO");
+                   in.motorStatus ? "DESLIGADO" : "LIGADO");
         }
       } else {
         ESP_LOGW(TAG_IO, "Falha ao ler PCF8574 de entrada");
@@ -1234,7 +1234,7 @@ void TaskIOControl(void *pv)
     if (mbCopy.status == 0x00) { // Sensor OK
       double mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0;
 
-      if (mediaCorrente < 20.0) {
+      if (mediaCorrente < 20.0 && inputCopy.motorStatus == false) {
         // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
         output_PLC &= ~(1 << 2); 
         output_PLC &= ~(1 << 3); 
@@ -1258,7 +1258,7 @@ void TaskIOControl(void *pv)
     }
 
     // --- SINALIZAÇÃO DO ESTADO DO MOTOR ---
-    if (inputCopy.motorOff) {
+    if (inputCopy.motorStatus) {
       output_PLC |= (1 << 5);
     } else {
       output_PLC &= ~(1 << 5);
