@@ -16,7 +16,7 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
@@ -81,7 +81,8 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
   ESP_LOGI(TAG, "Task iniciada | core=%d | task=%s", xPortGetCoreID(), pcTaskGetName(NULL))
 
 #define LOG_HEAP(TAG) \
-  ESP_LOGI(TAG, "Heap livre: %lu bytes", (unsigned long)ESP.getFreeHeap())
+  ESP_LOGI(TAG, "Memória RAM livre: %lu bytes", (unsigned long)ESP.getFreeHeap()) // Heap livre no ESP32 é a quantidade de memória RAM disponível e dinâmica. 
+                                                                                  // O ESP32 possui cerca de 520 KB de SRAM
 
 // =====================================================
 // Hardware
@@ -782,9 +783,10 @@ void setup() {
   // Inicializa Serial Modbus/Hardware Secundário
   Serial1.begin(9600, SERIAL_8N1, 14, 27);
 
-  ESP_LOGI(TAG_MAIN, "----------------------- SETUP OK ---------------------------");
   // Se o Heap chegar a zero (falta de memória), o ESP32 vai reiniciar sozinho (Soft WDT ou Panic Core).
   LOG_HEAP(TAG_MAIN);
+  ESP_LOGI(TAG_MAIN, "============================== SETUP CONCLUÍDO COM SUCESSO ==============================");
+
   vTaskDelay(pdMS_TO_TICKS(50)); // Dá tempo para a UART esvaziar o buffer
 
   // =====================================================
@@ -800,7 +802,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskIOControl,  "TaskIOControl",  STACK_IO_CONTROL, NULL, 1, &taskIOHandle,         0);
 
   // Tasks de Comunicação: Rodam no Core 1 para não sofrerem interferência do Hardware
-  xTaskCreatePinnedToCore(TaskBlynk, "TaskBlynk", STACK_BLYNK, NULL, 3, &taskBlynkHandle, 1);
+  xTaskCreatePinnedToCore(TaskBlynk,      "TaskBlynk",      STACK_BLYNK,      NULL, 3, &taskBlynkHandle,      1);
 
 }
 
