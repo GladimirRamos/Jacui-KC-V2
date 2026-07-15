@@ -16,7 +16,7 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
@@ -107,7 +107,7 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 RTC_DS1307 RTC;
 Preferences preferences;
-//ModbusMaster node1
+
 // Instanciação do cliente eModbus associado à Serial1
 ModbusClientRTU mbClient(Serial1);
 
@@ -255,6 +255,11 @@ volatile uint32_t tempoTaskDisplay = 0;
 volatile uint32_t tempoTaskIO      = 0;
 volatile bool gForceRtcWdtReset    = false;
 
+// Variáveis globais de controle de calibração dinâmica do sensor de nível
+int gSensorMin   = 0;
+int gSensorMax   = 4095;
+bool gCalibrando = false;
+
 // =====================================================
 // Protótipos
 // =====================================================
@@ -329,6 +334,62 @@ void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
     }
 }
 
+// Callback do botão de calibração (V26)
+BLYNK_WRITE(V26) {
+  int estadoBotao = param.asInt(); // 1 = Apertado, 0 = Solto
+  
+  if (estadoBotao == 1) {
+    // Inicia a calibração
+    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+      gSensorMin = 4095;
+      gSensorMax = 0;
+      gCalibrando = true;
+      xSemaphoreGive(mtxData);
+    }
+    
+    // Log Local e no Blynk
+    //ESP_LOGI("CALIBRACAO", "Modo de calibracao INICIADO.");
+    queueLogf("Mova o sensor entre os extremos!");
+    
+  } else {
+    // Finaliza a calibração
+    int minSalvar = 0;
+    int maxSalvar = 4095;
+    bool limitesValidos = true;
+
+    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+      gCalibrando = false;
+      
+      // Validação de segurança
+      if (gSensorMin >= gSensorMax) {
+        gSensorMin = 0;
+        gSensorMax = 4095;
+        limitesValidos = false;
+      }
+      
+      minSalvar = gSensorMin;
+      maxSalvar = gSensorMax;
+      xSemaphoreGive(mtxData);
+    }
+
+    if (limitesValidos) {
+      // Grava os novos limites calibrados de forma persistente na memória Flash NVS
+      preferences.begin("my-app", false);
+      preferences.putInt("sensorMin", minSalvar);
+      preferences.putInt("sensorMax", maxSalvar);
+      preferences.end();
+
+      // Log de Sucesso
+      //ESP_LOGI("CALIBRACAO", "Modo de calibracao finalizado: Min=%d, Max=%d", minSalvar, maxSalvar);
+      queueLogf("Calibração ok, limites salvos.   Min: %d | Max: %d", minSalvar, maxSalvar);
+    } else {
+      // Log de Falha/Reset de Segurança
+      //ESP_LOGW("CALIBRACAO", "Limites invalidos detectados. Revertido para o padrao (0-4095).");
+      queueLogf("Cal. falha! Revertido para 0 a 4095");
+    }
+  }
+}
+
 //int BotaoRESET = 0; // Mantido caso use em outro local do escopo
 
 BLYNK_WRITE(V27) { gerenciarCallbackBotao(BTN_MANUAL, param.asInt()); }
@@ -382,33 +443,61 @@ BLYNK_WRITE(V55)
 // =====================================================
 
 void imprimirDiagnosticoSistema() {
-    Serial.println(F("\n==================================================="));
-    Serial.println(F("         DIAGNÓSTICO DE SAÚDE DO ESP32       "));
-    Serial.println(F("==================================================="));
-
-    // 1. Tempo de atividade (Uptime)
+    // 1. Calculos de Tempo e Memoria
     uint64_t uptime_us = esp_timer_get_time();
-    uint32_t uptime_s = (uint32_t)(uptime_us / 1000000ULL);
-    Serial.printf("Tempo ligado (Uptime): %u segundos (%u minutos)\n", uptime_s, uptime_s / 60);
+    uint32_t uptime_s  = (uint32_t)(uptime_us / 1000000ULL);
+    uint32_t dias      = uptime_s / 86400;
+    uint32_t horas     = (uptime_s % 86400) / 3600;
+    uint32_t minutos   = (uptime_s % 3600) / 60;
+    uint32_t segundos  = uptime_s % 60;
 
-    // 2. Memória RAM (Heap) - Crítico para sistemas com WiFi/Blynk
-    uint32_t free_heap = esp_get_free_heap_size();
-    uint32_t min_free_heap = esp_get_minimum_free_heap_size(); // Menor nível de RAM que o chip já atingiu
-    Serial.printf("Memória RAM Livre Atual: %u bytes\n", free_heap);
-    Serial.printf("Menor RAM Livre Histórica: %u bytes\n", min_free_heap);
+    uint32_t free_heap     = esp_get_free_heap_size();
+    uint32_t min_free_heap = esp_get_minimum_free_heap_size();
 
+    // 2. Cabecalho Principal
+    Serial.println(F("\n===================================================="));
+    Serial.println(F("           DIAGNOSTICO DE SAUDE DO ESP32           "));
+    Serial.println(F("===================================================="));
+
+    // 3. Informacoes do Hardware
+    Serial.println(F("--- HARDWARE ---"));
+    Serial.printf(" Revision do Chip ESP32   : %d\n", ESP.getChipRevision());
+    Serial.printf(" Frequencia da CPU        : %u MHz\n\n", getCpuFrequencyMhz());
+
+    // 4. Tempo de Atividade Formatado
+    Serial.println(F("--- SISTEMA ---"));
+    Serial.printf(" Uptime (Tempo Ligado)    : %dd %02dh %02dm %02ds\n\n", dias, horas, minutos, segundos);
+
+    // 5. Secao de Memoria RAM com Alertas Textuais
+    Serial.println(F("--- MEMORIA RAM (HEAP) ---"));
+    Serial.printf(" Memoria RAM Livre Atual  : %u bytes\n", free_heap);
+    
+    // Status textual baseado no historico minimo de RAM
     if (min_free_heap < 10000) {
-        Serial.println(F("[ALERTA]: Memória RAM perigosamente baixa! Risco de crash."));
+        Serial.printf(" Menor RAM Historica      : %u bytes (CRITICO)\n", min_free_heap);
+        Serial.println(F("\n[ALERTA] Memoria RAM perigosamente baixa! Risco de Crash."));
+    } else if (min_free_heap < 25000) {
+        Serial.printf(" Menor RAM Historica      : %u bytes (Atencao)\n", min_free_heap);
+    } else {
+        Serial.printf(" Menor RAM Historica      : %u bytes (Estavel)\n", min_free_heap);
     }
+    Serial.println();
 
-    // 3. Frequência do Processador
-    Serial.printf("Frequência da CPU: %u MHz\n", getCpuFrequencyMhz());
+    // 6. Monitoramento de Tasks em Tabela ASCII Limpa
+    Serial.println(F("+--------------------------------+------------------+"));
+    Serial.println(F("| METRICAS DE MEMORIA POR TASK   | STACK DISPONIVEL |"));
+    Serial.println(F("+--------------------------------+------------------+"));
 
-    // 4. Detalhes de Chip e Modelo
-    Serial.printf("Revisão do Chip ESP32: %d\n", ESP.getChipRevision());
-    Serial.println(F("---------------------------------------------------"));
-
+    if (taskBlynkHandle != NULL)   Serial.printf("| TaskBlynk                      |  %6u Bytes    |\n", uxTaskGetStackHighWaterMark(taskBlynkHandle));
+    if (taskIOHandle != NULL)      Serial.printf("| TaskIOControl                  |  %6u Bytes    |\n", uxTaskGetStackHighWaterMark(taskIOHandle));
+    if (taskRTCHandle != NULL)     Serial.printf("| TaskRTC                        |  %6u Bytes    |\n", uxTaskGetStackHighWaterMark(taskRTCHandle));
+    if (taskDisplayHandle != NULL) Serial.printf("| TaskDisplay                    |  %6u Bytes    |\n", uxTaskGetStackHighWaterMark(taskDisplayHandle));
+    if (taskModbusHandle != NULL)  Serial.printf("| TaskModbus                     |  %6u Bytes    |\n", uxTaskGetStackHighWaterMark(taskModbusHandle));
+    
+    Serial.println(F("+--------------------------------+------------------+"));
 }
+
+
 // =====================================================
 // Setup
 // =====================================================
@@ -647,9 +736,6 @@ void setup() {
 
   restoreMotorState(memMotorState);
 
-  // Inicializa Serial Modbus/Hardware Secundário
-  Serial1.begin(9600, SERIAL_8N1, 14, 27);
-
 // Inicializa RTC Externo
   // Define um timeout de 100 milissegundos em vez de esperar para sempre
   if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -673,12 +759,37 @@ void setup() {
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   ESP_LOGI(TAG_RTC, "NTP configurado. Servidor=%s GMT offset=%ld daylight=%d", ntpServer, gmtOffset_sec, daylightOffset_sec);
 
+  // Inicializa setup de calibaração do sensor de nível (NVS)
+  preferences.begin("my-app", false);
+  int minCarregado = 0;
+  int maxCarregado = 4095;
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(100)) == pdTRUE) {
+    gSensorMin = preferences.getInt("sensorMin", 0);
+    gSensorMax = preferences.getInt("sensorMax", 4095);
+    minCarregado = gSensorMin;
+    maxCarregado = gSensorMax;
+    xSemaphoreGive(mtxData);
+  }
+  preferences.end();
+  
+  // Setup da resolução do ADC para 9 bits (0 a 511) para reduzir o ruído e melhorar a estabilidade da leitura
+  // O ESP32 opera com resolução de 12 bits (valores de 0 a 4095),pode-se usar valores entre 9 e 11 bits.
+  analogReadResolution(9); // 9 bits = 0 a 511
+  // Imprime os limites gravados de calibração do sensor de nível
+  ESP_LOGI(TAG_MAIN, "Limites de calibracao carregados: Min=%d, Max=%d", minCarregado, maxCarregado);
+
+  // Inicializa Serial Modbus/Hardware Secundário
+  Serial1.begin(9600, SERIAL_8N1, 14, 27);
+
+  ESP_LOGI(TAG_MAIN, "----------------------- SETUP OK ---------------------------");
+  // Se o Heap chegar a zero (falta de memória), o ESP32 vai reiniciar sozinho (Soft WDT ou Panic Core).
+  LOG_HEAP(TAG_MAIN);
+  vTaskDelay(pdMS_TO_TICKS(50)); // Dá tempo para a UART esvaziar o buffer
+
   // =====================================================
   // Criação e Inicialização das Tarefas do FreeRTOS
   // =====================================================
-  
-  // TaskBlynk: Roda no Core 1 (Core padrão do ecossistema Arduino/Wi-Fi)
-  xTaskCreatePinnedToCore(TaskBlynk, "TaskBlynk", STACK_BLYNK, NULL, 3, &taskBlynkHandle, 1);
   
   // Tasks de Hardware/Controle: Rodam no Core 0 para não sofrerem interferência do Wi-Fi
 
@@ -688,16 +799,17 @@ void setup() {
   xTaskCreatePinnedToCore(TaskDisplay,    "TaskDisplay",    STACK_DISPLAY,    NULL, 2, &taskDisplayHandle,    0);
   xTaskCreatePinnedToCore(TaskIOControl,  "TaskIOControl",  STACK_IO_CONTROL, NULL, 1, &taskIOHandle,         0);
 
-  ESP_LOGI(TAG_MAIN, "----------------------- SETUP OK ---------------------------");
-  LOG_HEAP(TAG_MAIN);
+  // Tasks de Comunicação: Rodam no Core 1 para não sofrerem interferência do Hardware
+  xTaskCreatePinnedToCore(TaskBlynk, "TaskBlynk", STACK_BLYNK, NULL, 3, &taskBlynkHandle, 1);
+
 }
 
 void loop()
 {
-  // Tarefa que mostra um diagnóstico de saude do ESP32 a cada 10 segundos, mas está comentada para não poluir o log
+  // Tarefa que mostra um diagnóstico de saude do ESP32 a cada 70 segundos, mas está comentada para não poluir o log
   /*
   static uint32_t temporizadorDiagnostico = 0;
-  if (millis() - temporizadorDiagnostico > 60000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
+  if (millis() - temporizadorDiagnostico > 70000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
   vTaskDelay(pdMS_TO_TICKS(1)); 
   */
   
@@ -1093,17 +1205,7 @@ void TaskRTC(void *pv)
 
         // Mostra o mesmo contador no log nativo do ESP32 (decrementa aqui ao final)
         ESP_LOGI(TAG_WDT, "RTC Watchdog vai atuar para reiniciar o sistema... Contador: %d", contador_travamento--);
-        /*
-        // Sai do loop quando contador atingir 0, permitindo que o WDT dispare
-        if (contador_travamento == 0) {
-          queueLogf("RTCWDT_RTC_RESET aguardando disparo...");
-          ESP_LOGI(TAG_WDT, "RTC WDT sem feed: aguardando reset automatico");
-          // Mantem scheduler ativo para nao acionar TASK_WDT.
-          while (true) {
-            vTaskDelay(pdMS_TO_TICKS(250));
-          }
-        }
-        */
+
         // Periodicidade fixa de 1 segundo para evitar variacao visual no monitor serial.
         vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
       }
@@ -1114,7 +1216,7 @@ void TaskRTC(void *pv)
 }
 
 // =====================================================
-// Task IO - Core 0
+// Task IO Control - Core 0
 // =====================================================
 
 void TaskIOControl(void *pv)
@@ -1150,21 +1252,44 @@ void TaskIOControl(void *pv)
       if (readOk) {
         InputData in;
 
-        in.raw       = inputPCF;
+        in.raw          = inputPCF;
         in.motorStatus  = inputPCF & (1 << 0); // IN1
-        in.modoLocal = inputPCF & (1 << 1); // IN2
+        in.modoLocal    = inputPCF & (1 << 1); // IN2
 
-        // Leitura analógica do GPIO36 (Faixa nativa de 0 a 4095)
+        // 1. Leitura analógica nativa do GPIO36
         int leituraRaw = analogRead(36);
-  
-        // Mapeia o valor de 0-4095 para a escala de 0-100
-        int valorEscalonado = map(leituraRaw, 0, 4095, 0, 100);
 
+        int minLocal = 0;
+        int maxLocal = 4095;
+        bool calibrandoLocal = false;
+
+        // 2. Acesso seguro para verificar/atualizar a calibração
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-           gInputs = in;
-           gRun.valorAnalogico = valorEscalonado; // <- Salva o valor escalonado com segurança
-           xSemaphoreGive(mtxData);
-           }
+          calibrandoLocal = gCalibrando;
+      
+          if (calibrandoLocal) {
+           // Alarga os limites dinamicamente se encontrar valores mais extremos
+           if (leituraRaw < gSensorMin) gSensorMin = leituraRaw;
+           if (leituraRaw > gSensorMax) gSensorMax = leituraRaw;
+         }
+      
+          minLocal = gSensorMin;
+          maxLocal = gSensorMax;
+          xSemaphoreGive(mtxData);
+        }
+
+       // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
+       int leituraTratada = constrain(leituraRaw, minLocal, maxLocal);
+
+       // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100)
+       int valorEscalonado = map(leituraTratada, minLocal, maxLocal, 0, 100);
+
+      // 5. Salva de forma segura na estrutura global de execução
+      if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+         gInputs = in;
+      gRun.valorAnalogico = valorEscalonado; 
+      xSemaphoreGive(mtxData);
+      }
 
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
           gInputs = in;
@@ -1695,21 +1820,7 @@ void TaskSupervisor(void *pv) {
             updateBlynkStateText(gRun.blynkState, gRun.blynkStateText, sizeof(gRun.blynkStateText));
             xSemaphoreGive(mtxData);
          }
-		 
-         // --- Monitoramento de memória (Ativo para Debug) ---
-         /*
-         ESP_LOGI("SUPERVISOR", "--- MEMÓRIA LIVRE POR TASK ---");
-         if (taskBlynkHandle != NULL)      ESP_LOGI("SUPERVISOR", "TaskBlynk: %u B", uxTaskGetStackHighWaterMark(taskBlynkHandle));
-         if (taskIOHandle != NULL)         ESP_LOGI("SUPERVISOR", "TaskIOControl: %u B", uxTaskGetStackHighWaterMark(taskIOHandle));
-         if (taskRTCHandle != NULL)        ESP_LOGI("SUPERVISOR", "TaskRTC: %u B", uxTaskGetStackHighWaterMark(taskRTCHandle));
-         if (taskDisplayHandle != NULL)    ESP_LOGI("SUPERVISOR", "TaskDisplay: %u B", uxTaskGetStackHighWaterMark(taskDisplayHandle));
-         if (taskModbusHandle != NULL)     ESP_LOGI("SUPERVISOR", "TaskModbus: %u B", uxTaskGetStackHighWaterMark(taskModbusHandle));
-         ESP_LOGI("SUPERVISOR", "Heap Global Livre: %u bytes", esp_get_free_heap_size());
-         ESP_LOGI("SUPERVISOR", "--------------------------------------------------");
-         */
-
       }
-
       // Bloqueia a task por 250ms liberando o processador
       vTaskDelay(pdMS_TO_TICKS(250)); 
    }
