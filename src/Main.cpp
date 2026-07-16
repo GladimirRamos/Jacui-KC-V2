@@ -335,7 +335,8 @@ void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
     }
 }
 
-// Callback do botão de calibração (V26)
+// Callback do botão de calibração (V26), memoriza o máximo e mínimo do sensor de nível
+// enquanto o botão estiver pressionado. Ao soltar, grava os limites na memória NVS.
 BLYNK_WRITE(V26) {
   int estadoBotao = param.asInt(); // 1 = Apertado, 0 = Solto
   
@@ -498,7 +499,6 @@ void imprimirDiagnosticoSistema() {
     Serial.println(F("+--------------------------------+------------------+"));
 }
 
-
 // =====================================================
 // Setup
 // =====================================================
@@ -615,7 +615,7 @@ void vTaskDisplayInit(void *pvParameters) {
             if (exibeCoracao) {
             // Batida alta: Desenha o coração cheio na posição original
             display.setCursor(96, 0);
-            display.write(3); 
+            display.write(3);                // desenha o coração cheio
             } else {
             // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
             display.setCursor(96, 0);
@@ -628,8 +628,7 @@ void vTaskDisplayInit(void *pvParameters) {
         }
   }
     //  Ao finalizar os 60 segundos, deleta a task para liberar memória
-    //  removeer o comentário abaixo se quiser que a task seja deletada 
-    //  mas ele precisa ser criada no setup() com xTaskCreate() e não chamado diretamente como está sendo feito
+    //  remover o comentário abaixo se quiser que a task seja deletada 
     //vTaskDelete(NULL);
 }
 
@@ -751,7 +750,7 @@ void setup() {
     }
   } 
   else {
-    // TRATAMENTO DE ERRO: O que acontece se o display prender o I2C por mais de 500ms
+    // TRATAMENTO DE ERRO: O que acontece se o dispositivo RTC não estiver ok e prender o I2C por mais de 100ms
     ESP_LOGE(TAG_RTC, "Timeout: Nao foi possivel obter o semaforo mtxI2C para inicializar o RTC");
     failMSG("TIMEOUT I2C");
   }
@@ -1090,7 +1089,8 @@ void TaskRTC(void *pv)
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
         if (rtcSecondsStopped) {
           gRun.rtcError = true;
-          ESP_LOGI(TAG_RTC, "RTC sem avanço de segundos: %u", rtcSecond);
+          ESP_LOGI(TAG_RTC, "RTC travou no segundo: %u", rtcSecond);
+          queueLogf("RTC travou no segundo: %u", rtcSecond);
         } else if (now.year() < 2026) {
           gRun.rtcError = true;
           ESP_LOGI(TAG_RTC, "RTC com ano inválido: %d", now.year());
@@ -1747,12 +1747,12 @@ void TaskSupervisor(void *pv) {
          }
 
          bool rtcErrorEfetivo = rtcError && !blynkEmConfiguracao;
-         
+         /* faz isso nas linhas abaixo... ESP_LOGE(TAG_WDT, "  -> ERRO: RTC_I2C sem resposta física");
          if (rtcErrorEfetivo) {
-            ESP_LOGE(TAG_WDT, "ERRO CRÍTICO: RTC não respondendo. WDT nao sera alimentado.");
-            queueLogf("Erro critico no RTC!");
+            ESP_LOGE(TAG_WDT, "Erro crítico no RTC, não respondendo. WDT nao sera alimentado.");
+            queueLogf("Erro crítico no RTC!");
          }
-
+         */
          // 2. Cálculo de Saúde isolado para evitar divergências nos logs
          bool blynkSaudavel = blynkEmConfiguracao || blynkRodandoOnline || (now - lastAliveBlynk < 180000UL);
 
@@ -1811,7 +1811,7 @@ void TaskSupervisor(void *pv) {
             if ((now - lastAliveModbus)  >= 30000UL)  strncat(tasksTravadas, "Modbus! ",  sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
 
             // Envia para o log remoto/fila especificando o culpado exato
-            queueLogf("Erro de timeout: %s", tasksTravadas);
+            queueLogf("Supervisor timeout: %s", tasksTravadas);
          }
 
          // 3. Atualização das variáveis globais de telemetria de forma segura
