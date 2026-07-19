@@ -11,6 +11,9 @@
 
   - Comentada a linha 50 em Setings.h para ignorar o warning do LED não configurado
   - Comentada a linha 125 em Indicator.h para ignorar o warning do LED não configurado
+  #define WIFI_CLOUD_MAX_RETRIES        30    // 500 Maximum number of retries to connect to Blynk cloud 
+  #define WIFI_NET_CONNECT_TIMEOUT      20000 // 50000 Maximum time to wait for WiFi connection (ms)
+  #define WIFI_CLOUD_CONNECT_TIMEOUT    12000 // 50000 Maximum time to wait for Blynk cloud connection (ms)
 
  *************************************************************/
 
@@ -41,7 +44,7 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.2"
+#define BLYNK_FIRMWARE_VERSION "0.1.3"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23

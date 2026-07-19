@@ -111,9 +111,9 @@
 #define CONFIG_DEFAULT_PORT           443
 #endif
 
-#define WIFI_CLOUD_MAX_RETRIES        500
-#define WIFI_NET_CONNECT_TIMEOUT      50000
-#define WIFI_CLOUD_CONNECT_TIMEOUT    50000
+#define WIFI_CLOUD_MAX_RETRIES        10    // 500 Maximum number of retries to connect to Blynk cloud 
+#define WIFI_NET_CONNECT_TIMEOUT      50000 // 50000 Maximum time to wait for WiFi connection (ms)
+#define WIFI_CLOUD_CONNECT_TIMEOUT    10000 // 50000 Maximum time to wait for Blynk cloud connection (ms)
 #define WIFI_AP_IP                    IPAddress(192, 168, 4, 1)
 #define WIFI_AP_Subnet                IPAddress(255, 255, 255, 0)
 //#define WIFI_CAPTIVE_PORTAL_ENABLE
