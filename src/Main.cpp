@@ -15,6 +15,8 @@
   #define WIFI_NET_CONNECT_TIMEOUT      20000 // 50000 Maximum time to wait for WiFi connection (ms)
   #define WIFI_CLOUD_CONNECT_TIMEOUT    12000 // 50000 Maximum time to wait for Blynk cloud connection (ms)
 
+  Para controlar uma válvula proporcional de 0-5V usando o ESP32 com Wi-Fi ativo, o MCP4725 é o melhor DAC para o seu projeto.
+
  *************************************************************/
 
 #ifdef CONFIG_JACUI
@@ -93,6 +95,7 @@ static const char *TAG_SUPERVISOR = "SUPERVISOR";
 
 #define I2C_SCL 15
 #define I2C_SDA 4
+#define DAC_OUTPUT_PIN 26
 
 #define PCF_INPUT_ADDR   0x22
 #define PCF_OUTPUT_ADDR  0x24
@@ -295,6 +298,7 @@ void restoreMotorState(bool memMotorState);
 
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
+void updateDacFromNivelMovel(int leituraRaw, int valorEscalonado);
 
 void travarRelogio();
 void destravarRelogio();
@@ -562,6 +566,9 @@ void vTaskDisplayInit(void *pvParameters) {
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
 
   while (tempoStart > 0) {
+    // Mantem o DAC travado em 127 durante toda a janela de inicializacao.
+    dacWrite(DAC_OUTPUT_PIN, 127);
+
     // Bloqueia a tarefa por 500ms, liberando a CPU
     vTaskDelay(pdMS_TO_TICKS(500)); 
 
@@ -636,6 +643,9 @@ void vTaskDisplayInit(void *pvParameters) {
 }
 
 void setup() {
+  // Garante nivel inicial do DAC ao ligar o ESP32.
+  dacWrite(DAC_OUTPUT_PIN, 127);
+
   Serial.begin(115200);
   delay(300);
 
@@ -643,6 +653,7 @@ void setup() {
 
   ESP_LOGI(TAG_MAIN, "Inicializando firmware %s", BLYNK_FIRMWARE_VERSION);
   ESP_LOGI(TAG_MAIN, "Setup rodando no core %d", xPortGetCoreID());
+  ESP_LOGI(TAG_IO, "  DAC inicializado no GPIO %d com valor %d", DAC_OUTPUT_PIN, 127);
 
   initRtcWdt();
 
@@ -1286,8 +1297,12 @@ void TaskIOControl(void *pv)
        // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
        int leituraTratada = constrain(leituraRaw, minLocal, maxLocal);
 
-       // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100)
-       int valorEscalonado = map(leituraTratada, minLocal, maxLocal, 0, 100);
+      // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100)
+      int valorEscalonado = map(leituraTratada, minLocal, maxLocal, 0, 100);
+
+      // 4.1 Aplica media movel de 10 amostras e escreve no DAC (GPIO26) de forma inversa.
+      // Quanto maior o nivel (0..100), menor a saida DAC (127..0).
+      updateDacFromNivelMovel(leituraRaw, valorEscalonado);
 
       // 5. Salva de forma segura na estrutura global de execução
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1851,6 +1866,47 @@ void writeOutputPLC()
     }
   } else {
     ESP_LOGW(TAG_IO, "Timeout ao acessar I2C para escrita PCF saida");
+  }
+}
+
+void updateDacFromNivelMovel(int leituraRaw, int valorEscalonado)
+{
+  static int amostras[15] = {0};
+  static uint8_t indice = 0;
+  static uint8_t totalAmostras = 0;
+  static int soma = 0;
+  static uint32_t lastLogMs = 0;
+
+  valorEscalonado = constrain(valorEscalonado, 0, 100);
+
+  // Remove a amostra antiga antes de substituir no buffer circular.
+  soma -= amostras[indice];
+  amostras[indice] = valorEscalonado;
+  soma += amostras[indice];
+
+  indice = (indice + 1) % 15;
+  if (totalAmostras < 15 ) {
+    totalAmostras++;
+  }
+
+  int mediaMovel = soma / totalAmostras;
+
+  // Conversao inversa: 0 -> 127 e 100 -> 0, limitando a saida maxima em 127.
+  int dacValue = map(mediaMovel, 0, 100, 127, 0);
+  dacValue = constrain(dacValue, 0, 127);
+
+  dacWrite(DAC_OUTPUT_PIN, dacValue);
+
+  // Log temporario de diagnostico (1x por segundo) para validacao em campo.
+  uint32_t nowMs = millis();
+  if (nowMs - lastLogMs >= 1000) {
+    lastLogMs = nowMs;
+    ESP_LOGI(TAG_IO,
+             "DIAG DAC | ADC_RAW=%d | valorEscalonado=%d | mediaMovel=%d | DAC_GPIO26=%d",
+             leituraRaw,
+             valorEscalonado,
+             mediaMovel,
+             dacValue);
   }
 }
 
