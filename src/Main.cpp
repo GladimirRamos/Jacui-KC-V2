@@ -21,7 +21,7 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
@@ -262,6 +262,13 @@ volatile uint32_t tempoTaskDisplay = 0;
 volatile uint32_t tempoTaskIO      = 0;
 volatile bool gForceRtcWdtReset    = false;
 
+// Variaveis globais para controle da valvula
+bool manualValve    = false;
+int minValve        = 0;
+int maxValve        = 100;
+int centerValve     = 127;
+int VoutValve       = 0;
+
 // Variáveis globais de controle de calibração dinâmica do sensor de nível
 int gSensorMin   = 0;
 int gSensorMax   = 4095;
@@ -294,6 +301,8 @@ void loadCounterAndMotorState(bool &memMotorState);
 void loadSettingsFromNVS();
 void saveScheduleToNVS();
 void saveModoToNVS();
+void saveValveToNVS();
+void loadValveFromNVS();
 void restoreMotorState(bool memMotorState);
 
 const char *resetReasonName(esp_reset_reason_t r);
@@ -344,6 +353,85 @@ void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
 
 // Callback do botão de calibração (V26), memoriza o máximo e mínimo do sensor de nível
 // enquanto o botão estiver pressionado. Ao soltar, grava os limites na memória NVS.
+BLYNK_WRITE(V22) {
+  int estadoBotao = param.asInt(); // 1 = apertado, 0 = solto
+  bool estadoAtualizado = false;
+  bool estadoMudou = false;
+  bool manualValveNovo = false;
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+    bool manualValveAnterior = manualValve;
+    manualValveNovo = (estadoBotao == 1);
+    manualValve = manualValveNovo;  // enquanto o botão estiver pressionado, o controle da válvula é manual
+    estadoAtualizado = true;
+    estadoMudou = (manualValveAnterior != manualValveNovo);
+    xSemaphoreGive(mtxData);
+  }
+
+  if (estadoAtualizado) {
+    saveValveToNVS();
+  }
+
+  if (estadoMudou) {
+    queueLogf(manualValveNovo ? "Válvula em MANUAL" : "Válvula em AUTO");
+  }
+
+  if (manualValveNovo) {
+    Blynk.syncVirtual(V23, V24, V25);
+  }
+}
+
+BLYNK_WRITE(V23) {
+  bool podeCalibrar = false;
+  int valor = param.asInt();
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+    podeCalibrar = manualValve;
+    if (podeCalibrar) {
+      minValve = valor;
+    }
+    xSemaphoreGive(mtxData);
+  }
+
+  if (podeCalibrar) {
+    saveValveToNVS();
+  }
+}
+
+BLYNK_WRITE(V24) {
+  bool podeCalibrar = false;
+  int valor = param.asInt();
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+    podeCalibrar = manualValve;
+    if (podeCalibrar) {
+      centerValve = valor;
+    }
+    xSemaphoreGive(mtxData);
+  }
+
+  if (podeCalibrar) {
+    saveValveToNVS();
+  }
+}
+
+BLYNK_WRITE(V25) {
+  bool podeCalibrar = false;
+  int valor = param.asInt();
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+    podeCalibrar = manualValve;
+    if (podeCalibrar) {
+      maxValve = valor;
+    }
+    xSemaphoreGive(mtxData);
+  }
+
+  if (podeCalibrar) {
+    saveValveToNVS();
+  }
+}
+
 BLYNK_WRITE(V26) {
   int estadoBotao = param.asInt(); // 1 = Apertado, 0 = Solto
   
@@ -724,6 +812,7 @@ void setup() {
   bool memMotorState = true;
   loadCounterAndMotorState(memMotorState);
   loadSettingsFromNVS();
+  loadValveFromNVS();
 
   ESP_LOGI(TAG_NVS, "Quantidade de RESETs: %lu", (unsigned long)gRun.counterRST);
   esp_reset_reason_t reason = esp_reset_reason();
@@ -956,6 +1045,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       InputData inputCopy;
       RuntimeData runCopy;
       ScheduleData scheduleCopy;
+      bool manualValveCopy = false;
 
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
          timeCopy      = gTime;
@@ -970,6 +1060,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
         inputCopy    = gInputs;
         runCopy      = gRun;
         scheduleCopy = gSchedule;
+        manualValveCopy = manualValve;
         xSemaphoreGive(mtxData);
       } else {
         ESP_LOGW(TAG_BLYNK, "Timeout ao copiar dados compartilhados");
@@ -1018,6 +1109,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
                  (unsigned long)runCopy.counterRST);
 
         Blynk.virtualWrite(V45, resetMsg);
+        queueLogf(manualValveCopy ? "Válvula em MANUAL" : "Válvula em AUTO");
         ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);
 
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1871,11 +1963,24 @@ void writeOutputPLC()
 
 void outputValve(int nivelRaw, int nivelEscalonado)
 {
-  static int amostras[15] = {0};
+  static int amostras[10] = {0};
   static uint8_t indice = 0;
   static uint8_t totalAmostras = 0;
   static int soma = 0;
   static uint32_t lastLogMs = 0;
+
+  bool manualValveLocal = false;
+  int minValveLocal = 0;
+  int maxValveLocal = 100;
+  int centerValveLocal = 50;
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(20)) == pdTRUE) {
+    manualValveLocal = manualValve;
+    minValveLocal = minValve;
+    maxValveLocal = maxValve;
+    centerValveLocal = centerValve;
+    xSemaphoreGive(mtxData);
+  }
 
   nivelEscalonado = constrain(nivelEscalonado, 0, 100);
 
@@ -1884,15 +1989,28 @@ void outputValve(int nivelRaw, int nivelEscalonado)
   amostras[indice] = nivelEscalonado;
   soma += amostras[indice];
 
-  indice = (indice + 1) % 15;
-  if (totalAmostras < 15 ) {
+  indice = (indice + 1) % 10;
+  if (totalAmostras < 10 ) {
     totalAmostras++;
   }
 
   int mediaMovel = soma / totalAmostras;               // Retorna a média móvel das últimas amostras do sensor de nível (0 a 100)
 
-  int dacValue = map(mediaMovel, 0, 100, 127, 0);      // Conversao inversa: 0 -> 127 e 100 -> 0
-  
+  int dacValue = 0;
+  if (manualValveLocal) {
+    // Modo manual: usa o valor de centerValve dentro da faixa calibrada min/max.
+    if (minValveLocal == maxValveLocal) {             // se igual, não faz sentido mapear, então apenas inverte a escala de 0 a 100 para 127 a 0
+      dacValue = map(constrain(centerValveLocal, 0, 100), 0, 100, 0, 127);
+    } else {
+      int faixaMin = (minValveLocal < maxValveLocal) ? minValveLocal : maxValveLocal;
+      int faixaMax = (minValveLocal > maxValveLocal) ? minValveLocal : maxValveLocal;
+      int centerConstrain = constrain(centerValveLocal, faixaMin, faixaMax);
+      dacValue = map(centerConstrain, minValveLocal, maxValveLocal, 0, 127);  // Conversão direta: minValve -> 0 e maxValve -> 127
+    }
+  } else {
+    dacValue = map(mediaMovel, 0, 100, 127, 0);        // Conversao inversa automatica: 0 -> 127 e 100 -> 0
+  }
+
   dacValue = constrain(dacValue, 0, 127);              // Limita a saida dacValue entre 0 e maxima em 127
   dacWrite(DAC_OUTPUT_PIN, dacValue);                  // Escreve o valor no DAC (GPIO26), mas 127 = 5V pós circuito da KC868
 
@@ -2186,6 +2304,72 @@ void saveModoToNVS()
   preferences.end();
 
   ESP_LOGI(TAG_NVS, "Modo salvo NVS: %d", modo);
+}
+
+void saveValveToNVS()
+{
+  int minLocal = 0;
+  int centerLocal = 127;
+  int maxLocal = 100;
+  bool manualLocal = false;
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(100)) == pdTRUE) {
+    manualLocal = manualValve;
+    minLocal = minValve;
+    centerLocal = centerValve;
+    maxLocal = maxValve;
+    xSemaphoreGive(mtxData);
+  } else {
+    ESP_LOGW(TAG_NVS, "Timeout ao copiar calibracao da valvula para NVS");
+    return;
+  }
+
+  preferences.begin("my-app", false);
+  preferences.putBool("manualValve", manualLocal);
+  preferences.putInt("valveMin", minLocal);
+  preferences.putInt("valveCenter", centerLocal);
+  preferences.putInt("valveMax", maxLocal);
+  preferences.end();
+
+  ESP_LOGI(TAG_NVS,
+           "Valvula salva NVS: manual=%d min=%d center=%d max=%d",
+           manualLocal ? 1 : 0,
+           minLocal,
+           centerLocal,
+           maxLocal);
+}
+
+void loadValveFromNVS()
+{
+  int minLocal = 0;
+  int centerLocal = 127;
+  int maxLocal = 100;
+  bool manualLocal = false;
+
+  preferences.begin("my-app", false);
+  manualLocal = preferences.getBool("manualValve", false);
+  minLocal = preferences.getInt("valveMin", 0);
+  centerLocal = preferences.getInt("valveCenter", 127);
+  maxLocal = preferences.getInt("valveMax", 100);
+  preferences.end();
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(100)) == pdTRUE) {
+    manualValve = manualLocal;
+    minValve = minLocal;
+    centerValve = centerLocal;
+    maxValve = maxLocal;
+    xSemaphoreGive(mtxData);
+  } else {
+    ESP_LOGW(TAG_NVS, "Timeout ao restaurar calibracao da valvula da NVS");
+    return;
+  }
+
+  ESP_LOGI(TAG_NVS,
+           "Valvula carregada NVS: manual=%d min=%d center=%d max=%d",
+           manualLocal ? 1 : 0,
+           minLocal,
+           centerLocal,
+           maxLocal);
 }
 
 // =====================================================
