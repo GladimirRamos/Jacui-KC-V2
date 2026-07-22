@@ -232,7 +232,7 @@ struct RuntimeData {
   char blynkStateText[24];
   char modoText[16];
   bool sendResetLog;
-  int valorAnalogico;
+  int nivelMedido;
   bool rtcError;  // Sinaliza erro crítico do RTC
 };
 
@@ -298,7 +298,7 @@ void restoreMotorState(bool memMotorState);
 
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
-void updateDacFromNivelMovel(int leituraRaw, int valorEscalonado);
+void outputValve(int nivelRaw, int nivelEscalonado);
 
 void travarRelogio();
 void destravarRelogio();
@@ -960,7 +960,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
          timeCopy      = gTime;
          inputCopy     = gInputs;
-         runCopy       = gRun;       // runCopy já vai trazer o valorAnalogico atualizado
+         runCopy       = gRun;       // runCopy já vai trazer o nivelMedido atualizado
         scheduleCopy = gSchedule;
         xSemaphoreGive(mtxData);
         }
@@ -990,7 +990,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       Blynk.virtualWrite(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
       Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
-      Blynk.virtualWrite(V56, runCopy.valorAnalogico); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
+      Blynk.virtualWrite(V56, runCopy.nivelMedido); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
       Blynk.virtualWrite(V29, (~(output_PLC >> 2) & 0x01)); // Bit 2: rele 3/4 (0=ligado, 1=desligado)
 
       if (inputCopy.modoLocal) {
@@ -1273,10 +1273,10 @@ void TaskIOControl(void *pv)
         in.modoLocal    = inputPCF & (1 << 1); // IN2
 
         // 1. Leitura analógica nativa do GPIO36
-        int leituraRaw = analogRead(36);
+        int nivelRaw = analogRead(36);
 
-        int minLocal = 0;
-        int maxLocal = 4095;
+        int minSensorNivel = 0;
+        int maxSensorNivel = 4095;
         bool calibrandoLocal = false;
 
         // 2. Acesso seguro para verificar/atualizar a calibração
@@ -1285,29 +1285,29 @@ void TaskIOControl(void *pv)
       
           if (calibrandoLocal) {
            // Alarga os limites dinamicamente se encontrar valores mais extremos
-           if (leituraRaw < gSensorMin) gSensorMin = leituraRaw;
-           if (leituraRaw > gSensorMax) gSensorMax = leituraRaw;
+           if (nivelRaw < gSensorMin) gSensorMin = nivelRaw;
+           if (nivelRaw > gSensorMax) gSensorMax = nivelRaw;
          }
       
-          minLocal = gSensorMin;
-          maxLocal = gSensorMax;
+          minSensorNivel = gSensorMin;
+          maxSensorNivel = gSensorMax;
           xSemaphoreGive(mtxData);
         }
 
        // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
-       int leituraTratada = constrain(leituraRaw, minLocal, maxLocal);
+       int leituraTratada = constrain(nivelRaw, minSensorNivel, maxSensorNivel);
 
       // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100)
-      int valorEscalonado = map(leituraTratada, minLocal, maxLocal, 0, 100);
+      int nivelEscalonado = map(leituraTratada, minSensorNivel, maxSensorNivel, 0, 100);
 
-      // 4.1 Aplica media movel de 10 amostras e escreve no DAC (GPIO26) de forma inversa.
-      // Quanto maior o nivel (0..100), menor a saida DAC (127..0).
-      updateDacFromNivelMovel(leituraRaw, valorEscalonado);
+      // 4.1 Aplica media movel de amostras e escreve no DAC (GPIO26) de forma inversa.
+      // Quanto maior o nivel, menor a saida DAC.
+      outputValve(nivelRaw, nivelEscalonado);
 
       // 5. Salva de forma segura na estrutura global de execução
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
          gInputs = in;
-      gRun.valorAnalogico = valorEscalonado; 
+      gRun.nivelMedido = nivelEscalonado; 
       xSemaphoreGive(mtxData);
       }
 
@@ -1869,7 +1869,7 @@ void writeOutputPLC()
   }
 }
 
-void updateDacFromNivelMovel(int leituraRaw, int valorEscalonado)
+void outputValve(int nivelRaw, int nivelEscalonado)
 {
   static int amostras[15] = {0};
   static uint8_t indice = 0;
@@ -1877,11 +1877,11 @@ void updateDacFromNivelMovel(int leituraRaw, int valorEscalonado)
   static int soma = 0;
   static uint32_t lastLogMs = 0;
 
-  valorEscalonado = constrain(valorEscalonado, 0, 100);
+  nivelEscalonado = constrain(nivelEscalonado, 0, 100);
 
   // Remove a amostra antiga antes de substituir no buffer circular.
   soma -= amostras[indice];
-  amostras[indice] = valorEscalonado;
+  amostras[indice] = nivelEscalonado;
   soma += amostras[indice];
 
   indice = (indice + 1) % 15;
@@ -1889,22 +1889,21 @@ void updateDacFromNivelMovel(int leituraRaw, int valorEscalonado)
     totalAmostras++;
   }
 
-  int mediaMovel = soma / totalAmostras;
+  int mediaMovel = soma / totalAmostras;               // Retorna a média móvel das últimas amostras do sensor de nível (0 a 100)
 
-  // Conversao inversa: 0 -> 127 e 100 -> 0, limitando a saida maxima em 127.
-  int dacValue = map(mediaMovel, 0, 100, 127, 0);
-  dacValue = constrain(dacValue, 0, 127);
-
-  dacWrite(DAC_OUTPUT_PIN, dacValue);
+  int dacValue = map(mediaMovel, 0, 100, 127, 0);      // Conversao inversa: 0 -> 127 e 100 -> 0
+  
+  dacValue = constrain(dacValue, 0, 127);              // Limita a saida dacValue entre 0 e maxima em 127
+  dacWrite(DAC_OUTPUT_PIN, dacValue);                  // Escreve o valor no DAC (GPIO26), mas 127 = 5V pós circuito da KC868
 
   // Log temporario de diagnostico (1x por segundo) para validacao em campo.
   uint32_t nowMs = millis();
   if (nowMs - lastLogMs >= 1000) {
     lastLogMs = nowMs;
     ESP_LOGI(TAG_IO,
-             "DIAG DAC | ADC_RAW=%d | valorEscalonado=%d | mediaMovel=%d | DAC_GPIO26=%d",
-             leituraRaw,
-             valorEscalonado,
+             "DIAG DAC | ADC_RAW=%d | nivelEscalonado=%d | mediaMovel=%d | DAC_GPIO26=%d",
+             nivelRaw,
+             nivelEscalonado,
              mediaMovel,
              dacValue);
   }
