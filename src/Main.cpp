@@ -266,7 +266,7 @@ volatile bool gForceRtcWdtReset    = false;
 bool manualValve    = false;
 int minValve        = 0;
 int maxValve        = 100;
-int centerValve     = 127;
+int adjValve        = 127;
 int VoutValve       = 0;
 
 // Variáveis globais de controle de calibração dinâmica do sensor de nível
@@ -307,7 +307,7 @@ void restoreMotorState(bool memMotorState);
 
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
-void outputValve(int nivelRaw, int nivelEscalonado);
+int outputValve(int nivelRaw, int nivelEscalonado);
 
 void travarRelogio();
 void destravarRelogio();
@@ -352,7 +352,7 @@ void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
 }
 
 // Callback do botão de calibração (V26), memoriza o máximo e mínimo do sensor de nível
-// enquanto o botão estiver pressionado. Ao soltar, grava os limites na memória NVS.
+// enquanto o botão estiver pressionado modo Manual. Ao soltar, grava os limites na memória NVS.
 BLYNK_WRITE(V22) {
   int estadoBotao = param.asInt(); // 1 = apertado, 0 = solto
   bool estadoAtualizado = false;
@@ -397,7 +397,7 @@ BLYNK_WRITE(V23) {
     saveValveToNVS();
   }
 }
-
+// ajuste Manual da valvula proporcional (0-100%) via APP Blynk, enquanto o botão V22 estiver pressionado
 BLYNK_WRITE(V24) {
   bool podeCalibrar = false;
   int valor = param.asInt();
@@ -405,7 +405,7 @@ BLYNK_WRITE(V24) {
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
     podeCalibrar = manualValve;
     if (podeCalibrar) {
-      centerValve = valor;
+      adjValve = valor;
     }
     xSemaphoreGive(mtxData);
   }
@@ -1046,6 +1046,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       RuntimeData runCopy;
       ScheduleData scheduleCopy;
       bool manualValveCopy = false;
+      int dacValveCopy = 0;
 
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
          timeCopy      = gTime;
@@ -1061,6 +1062,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
         runCopy      = gRun;
         scheduleCopy = gSchedule;
         manualValveCopy = manualValve;
+        dacValveCopy = VoutValve;
         xSemaphoreGive(mtxData);
       } else {
         ESP_LOGW(TAG_BLYNK, "Timeout ao copiar dados compartilhados");
@@ -1082,6 +1084,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
 
       Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
       Blynk.virtualWrite(V56, runCopy.nivelMedido); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
+      Blynk.virtualWrite(V21, dacValveCopy); // <- Publica o valor atual do DAC (0 a 127)
       Blynk.virtualWrite(V29, (~(output_PLC >> 2) & 0x01)); // Bit 2: rele 3/4 (0=ligado, 1=desligado)
 
       if (inputCopy.modoLocal) {
@@ -1386,25 +1389,20 @@ void TaskIOControl(void *pv)
           xSemaphoreGive(mtxData);
         }
 
-       // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
-       int leituraTratada = constrain(nivelRaw, minSensorNivel, maxSensorNivel);
+      // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
+      int leituraTratada = constrain(nivelRaw, minSensorNivel, maxSensorNivel);
 
       // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100)
       int nivelEscalonado = map(leituraTratada, minSensorNivel, maxSensorNivel, 0, 100);
 
       // 4.1 Aplica media movel de amostras e escreve no DAC (GPIO26) de forma inversa.
-      // Quanto maior o nivel, menor a saida DAC.
-      outputValve(nivelRaw, nivelEscalonado);
+      // Quanto maior o nivel, menor a saida DAC, chama a função a cada 200ms.
+      int nivelMediaMovel = outputValve(nivelRaw, nivelEscalonado);
 
       // 5. Salva de forma segura na estrutura global de execução
-      if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-         gInputs = in;
-      gRun.nivelMedido = nivelEscalonado; 
-      xSemaphoreGive(mtxData);
-      }
-
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
           gInputs = in;
+          gRun.nivelMedido = nivelMediaMovel;
 
           if (in.modoLocal) {
             strncpy(gRun.modoText, "LOCAL", sizeof(gRun.modoText) - 1);
@@ -1961,70 +1959,103 @@ void writeOutputPLC()
   }
 }
 
-void outputValve(int nivelRaw, int nivelEscalonado)
+int outputValve(int nivelRaw, int nivelEscalonado)
 {
-  static int amostras[10] = {0};
+  // Define a quantidade de amostras como uma constante local
+  const int qtdAmostras = 10;
+
+  // O compilador aceita constantes para definir o tamanho de arrays estáticos
+  static int amostras[qtdAmostras] = {0};
   static uint8_t indice = 0;
   static uint8_t totalAmostras = 0;
   static int soma = 0;
   static uint32_t lastLogMs = 0;
 
+  // Inicializa as variáveis locais com valores padrão seguros antes do Mutex
   bool manualValveLocal = false;
-  int minValveLocal = 0;
-  int maxValveLocal = 100;
-  int centerValveLocal = 50;
+  int  adjValveLocal    = 50;
+  int  minValveLocal    = 0;
+  int  maxValveLocal    = 100;
 
+  // Tenta obter o Mutex. Se falhar, usa os valores padrão acima com segurança
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(20)) == pdTRUE) {
     manualValveLocal = manualValve;
+    adjValveLocal = adjValve;
     minValveLocal = minValve;
     maxValveLocal = maxValve;
-    centerValveLocal = centerValve;
     xSemaphoreGive(mtxData);
   }
 
   nivelEscalonado = constrain(nivelEscalonado, 0, 100);
 
-  // Remove a amostra antiga antes de substituir no buffer circular.
+  // Remove a amostra antiga antes de substituir no buffer circular
   soma -= amostras[indice];
   amostras[indice] = nivelEscalonado;
   soma += amostras[indice];
 
-  indice = (indice + 1) % 10;
-  if (totalAmostras < 10 ) {
+  // Atualiza a quantidade de amostras ANTES do cálculo da média móvel
+  if (totalAmostras < qtdAmostras) {
     totalAmostras++;
   }
+  indice = (indice + 1) % qtdAmostras;
 
-  int mediaMovel = soma / totalAmostras;               // Retorna a média móvel das últimas amostras do sensor de nível (0 a 100)
+  // PROTEÇÃO DIVISÃO POR ZERO: Garante que o divisor seja no mínimo 1
+  int divisor = (totalAmostras == 0) ? 1 : totalAmostras;
+  int nivelMediaMovel = soma / divisor;
 
   int dacValue = 0;
-  if (manualValveLocal) {
-    // Modo manual: usa o valor de centerValve dentro da faixa calibrada min/max.
-    if (minValveLocal == maxValveLocal) {             // se igual, não faz sentido mapear, então apenas inverte a escala de 0 a 100 para 127 a 0
-      dacValue = map(constrain(centerValveLocal, 0, 100), 0, 100, 0, 127);
-    } else {
-      int faixaMin = (minValveLocal < maxValveLocal) ? minValveLocal : maxValveLocal;
-      int faixaMax = (minValveLocal > maxValveLocal) ? minValveLocal : maxValveLocal;
-      int centerConstrain = constrain(centerValveLocal, faixaMin, faixaMax);
-      dacValue = map(centerConstrain, minValveLocal, maxValveLocal, 0, 127);  // Conversão direta: minValve -> 0 e maxValve -> 127
-    }
+  if (manualValveLocal) {                         // True = Modo Manual: DAC segue diretamente o ajuste manual do APP
+    int adjConstrain = constrain(adjValveLocal, 0, 100);
+    //dacValue = map(adjConstrain, 0, 100, 127, 0);
+    dacValue = map(adjConstrain, 0, 100, 0, 127); // Se quiser inverter, use esta linha em vez da anterior
+
   } else {
-    dacValue = map(mediaMovel, 0, 100, 127, 0);        // Conversao inversa automatica: 0 -> 127 e 100 -> 0
+    // Modo Automático:
+    // Usa adjValveLocal como ponto central e aplica variação inversamente
+    // proporcional ao nível, limitada entre minValveLocal e maxValveLocal.
+    int valveMin = min(minValveLocal, maxValveLocal);  // trava de segurança para garantir que min seja sempre menor que max
+    int valveMax = max(minValveLocal, maxValveLocal);  // trava de segurança para garantir que max seja sempre maior que min
+    int valveAdj = constrain(adjValveLocal, valveMin, valveMax);    // trava para garantir que adj esteja sempre entre min e max
+    int valvePercent = valveAdj;
+     
+    if (nivelMediaMovel <= 50) {
+      // Nível baixo -> aumenta abertura em direção ao máximo
+      valvePercent = valveAdj + ((50 - nivelMediaMovel) * (valveMax - valveAdj)) / 50;
+    } else {
+      // Nível alto -> reduz abertura em direção ao mínimo
+      valvePercent = valveAdj - ((nivelMediaMovel - 50) * (valveAdj - valveMin)) / 50;
+    }
+
+    valvePercent = constrain(valvePercent, valveMin, valveMax);
+    dacValue = map(valvePercent, 0, 100, 0, 127);
   }
 
-  dacValue = constrain(dacValue, 0, 127);              // Limita a saida dacValue entre 0 e maxima em 127
-  dacWrite(DAC_OUTPUT_PIN, dacValue);                  // Escreve o valor no DAC (GPIO26), mas 127 = 5V pós circuito da KC868
+  // Limita a saída dacValue por segurança entre 0 e a máxima de 127
+  dacValue = constrain(dacValue, 0, 127);              
+  dacWrite(DAC_OUTPUT_PIN, dacValue);                  
 
-  // Log temporario de diagnostico (1x por segundo) para validacao em campo.
+  // Compartilha o último valor aplicado ao DAC em escala percentual (0 a 100), para enviar ao Blynk.
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
+    VoutValve = map(dacValue, 0, 127, 0, 100)+1;
+    //VoutValve = constrain(VoutValve, 0, 100);
+    xSemaphoreGive(mtxData);
+  }
+
+  // Log temporário de diagnóstico (1x por segundo) para validação em campo
+  /*
   uint32_t nowMs = millis();
   if (nowMs - lastLogMs >= 1000) {
     lastLogMs = nowMs;
     ESP_LOGI(TAG_IO,
-             "DIAG DAC | ADC_RAW=%d | nivelEscalonado=%d | mediaMovel=%d | DAC_GPIO26=%d",
+             "ADC_RAW=%d | nivelEscalonado=%d | nivelMediaMovel=%d | DAC_GPIO26=%d | ModoManual=%d",
              nivelRaw,
              nivelEscalonado,
-             mediaMovel,
-             dacValue);
+             nivelMediaMovel,
+             dacValue,
+             manualValveLocal);
   }
+  */
+  return nivelMediaMovel;
 }
 
 void pulseLiga(const char *motivo) {
@@ -2309,14 +2340,14 @@ void saveModoToNVS()
 void saveValveToNVS()
 {
   int minLocal = 0;
-  int centerLocal = 127;
+  int adjValveLocal = 127;
   int maxLocal = 100;
   bool manualLocal = false;
 
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(100)) == pdTRUE) {
     manualLocal = manualValve;
     minLocal = minValve;
-    centerLocal = centerValve;
+    adjValveLocal = adjValve;
     maxLocal = maxValve;
     xSemaphoreGive(mtxData);
   } else {
@@ -2327,7 +2358,7 @@ void saveValveToNVS()
   preferences.begin("my-app", false);
   preferences.putBool("manualValve", manualLocal);
   preferences.putInt("valveMin", minLocal);
-  preferences.putInt("valveCenter", centerLocal);
+  preferences.putInt("valveCenter", adjValveLocal);
   preferences.putInt("valveMax", maxLocal);
   preferences.end();
 
@@ -2335,28 +2366,28 @@ void saveValveToNVS()
            "Valvula salva NVS: manual=%d min=%d center=%d max=%d",
            manualLocal ? 1 : 0,
            minLocal,
-           centerLocal,
+           adjValveLocal,
            maxLocal);
 }
 
 void loadValveFromNVS()
 {
   int minLocal = 0;
-  int centerLocal = 127;
+  int adjValveLocal = 127;
   int maxLocal = 100;
   bool manualLocal = false;
 
   preferences.begin("my-app", false);
   manualLocal = preferences.getBool("manualValve", false);
   minLocal = preferences.getInt("valveMin", 0);
-  centerLocal = preferences.getInt("valveCenter", 127);
+  adjValveLocal = preferences.getInt("valveCenter", 127);
   maxLocal = preferences.getInt("valveMax", 100);
   preferences.end();
 
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(100)) == pdTRUE) {
     manualValve = manualLocal;
     minValve = minLocal;
-    centerValve = centerLocal;
+    adjValve = adjValveLocal;
     maxValve = maxLocal;
     xSemaphoreGive(mtxData);
   } else {
@@ -2368,7 +2399,7 @@ void loadValveFromNVS()
            "Valvula carregada NVS: manual=%d min=%d center=%d max=%d",
            manualLocal ? 1 : 0,
            minLocal,
-           centerLocal,
+           adjValveLocal,
            maxLocal);
 }
 
