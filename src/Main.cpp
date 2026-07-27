@@ -308,6 +308,9 @@ void restoreMotorState(bool memMotorState);
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
 int outputValve(int nivelRaw, int nivelEscalonado);
+void aplicarModoValvulaManual(bool ativo);
+void iniciarCalibracaoNivel();
+void finalizarCalibracaoNivel();
 
 void travarRelogio();
 void destravarRelogio();
@@ -317,7 +320,16 @@ void destravarRelogio();
 // =====================================================
 
 // Enumeração para identificar os botões controlados
-enum TipoBotao { BTN_MANUAL, BTN_AGENDA, BTN_RESET, BTN_LIGA, BTN_DESLIGA, BTN_COUNT };
+enum TipoBotao {
+  BTN_VALVE_MANUAL,
+  BTN_CALIBRA,
+  BTN_MANUAL,
+  BTN_AGENDA,
+  BTN_RESET,
+  BTN_LIGA,
+  BTN_DESLIGA,
+  BTN_COUNT
+};
 
 // Estrutura para gerenciar o temporizador de cada botão
 struct ControleBotao {
@@ -329,42 +341,36 @@ struct ControleBotao {
 
 // Inicializa a matriz com os pinos virtuais correspondentes
 ControleBotao botoes[BTN_COUNT] = {
-    {27, 0, false, 0}, // BTN_MANUAL
-    {28, 0, false, 0}, // BTN_AGENDA
-    {39, 0, false, 0}, // BTN_RESET
-    {41, 0, false, 0}, // BTN_LIGA
-    {42, 0, false, 0}  // BTN_DESLIGA
+  {22, 0, false, 0}, // BTN_VALVE_MANUAL
+  {26, 0, false, 0}, // BTN_CALIBRA
+  {27, 0, false, 0}, // BTN_MANUAL
+  {28, 0, false, 0}, // BTN_AGENDA
+  {39, 0, false, 0}, // BTN_RESET
+  {41, 0, false, 0}, // BTN_LIGA
+  {42, 0, false, 0}  // BTN_DESLIGA
 };
 
 // Função auxiliar para iniciar a contagem do botão
 void gerenciarCallbackBotao(TipoBotao tipo, int valor) {
-    botoes[tipo].valorAtual = valor;
-    if (valor == 1) {
-        botoes[tipo].tempoInicio = millis();
-        botoes[tipo].aguardando = true;
-        //queueLogf("Botao V%d ativo. Aguardando 5 segundos para confirmar...", botoes[tipo].virtualPin);
-    } else {
-        if (botoes[tipo].aguardando) {
-            //queueLogf("Comando V%d cancelado (botao solto antes dos 5s)", botoes[tipo].virtualPin);
-        }
-        botoes[tipo].aguardando = false;
-    }
+  if (botoes[tipo].valorAtual == valor) {
+    return;
+  }
+
+  botoes[tipo].valorAtual = valor;
+  botoes[tipo].tempoInicio = millis();
+  botoes[tipo].aguardando = true;
+  //queueLogf("Botao V%d mudou para %d. Aguardando 5 segundos para confirmar...", botoes[tipo].virtualPin, valor);
 }
 
-// Callback do botão de calibração (V26), memoriza o máximo e mínimo do sensor de nível
-// enquanto o botão estiver pressionado modo Manual. Ao soltar, grava os limites na memória NVS.
-BLYNK_WRITE(V22) {
-  int estadoBotao = param.asInt(); // 1 = apertado, 0 = solto
+void aplicarModoValvulaManual(bool ativo) {
   bool estadoAtualizado = false;
   bool estadoMudou = false;
-  bool manualValveNovo = false;
 
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
     bool manualValveAnterior = manualValve;
-    manualValveNovo = (estadoBotao == 1);
-    manualValve = manualValveNovo;  // enquanto o botão estiver pressionado, o controle da válvula é manual
+    manualValve = ativo;
     estadoAtualizado = true;
-    estadoMudou = (manualValveAnterior != manualValveNovo);
+    estadoMudou = (manualValveAnterior != manualValve);
     xSemaphoreGive(mtxData);
   }
 
@@ -373,13 +379,63 @@ BLYNK_WRITE(V22) {
   }
 
   if (estadoMudou) {
-    queueLogf(manualValveNovo ? "Válvula em MANUAL" : "Válvula em AUTO");
+    queueLogf(ativo ? "Valvula em MANUAL" : "Valvula em AUTO");
   }
 
-  if (manualValveNovo) {
+  // Em MANUAL, habilita ajustes V23/V24/V25. Em AUTO, bloqueia ajustes no app.
+  Blynk.setProperty(V23, "isDisabled", ativo ? "false" : "true");
+  Blynk.setProperty(V24, "isDisabled", ativo ? "false" : "true");
+  Blynk.setProperty(V25, "isDisabled", ativo ? "false" : "true");
+
+  if (ativo) {
     Blynk.syncVirtual(V23, V24, V25);
   }
 }
+
+void iniciarCalibracaoNivel() {
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+    gSensorMin = 4095;
+    gSensorMax = 0;
+    gCalibrando = true;
+    xSemaphoreGive(mtxData);
+  }
+
+  queueLogf("Mova o sensor entre os extremos!");
+}
+
+void finalizarCalibracaoNivel() {
+  int minSalvar = 0;
+  int maxSalvar = 4095;
+  bool limitesValidos = true;
+
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+    gCalibrando = false;
+
+    if (gSensorMin >= gSensorMax) {
+      gSensorMin = 0;
+      gSensorMax = 4095;
+      limitesValidos = false;
+    }
+
+    minSalvar = gSensorMin;
+    maxSalvar = gSensorMax;
+    xSemaphoreGive(mtxData);
+  }
+
+  if (limitesValidos) {
+    preferences.begin("my-app", false);
+    preferences.putInt("sensorMin", minSalvar);
+    preferences.putInt("sensorMax", maxSalvar);
+    preferences.end();
+
+    queueLogf("Calibracao ok, limites salvos.   Min: %d | Max: %d", minSalvar, maxSalvar);
+  } else {
+    queueLogf("Cal. falha! Revertido para 0 a 4095");
+  }
+}
+
+// Callback do botão da valvula manual (V22) com confirmação por tempo.
+BLYNK_WRITE(V22) { gerenciarCallbackBotao(BTN_VALVE_MANUAL, param.asInt()); }
 
 BLYNK_WRITE(V23) {
   bool podeCalibrar = false;
@@ -432,60 +488,8 @@ BLYNK_WRITE(V25) {
   }
 }
 
-BLYNK_WRITE(V26) {
-  int estadoBotao = param.asInt(); // 1 = Apertado, 0 = Solto
-  
-  if (estadoBotao == 1) {
-    // Inicia a calibração
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gSensorMin = 4095;
-      gSensorMax = 0;
-      gCalibrando = true;
-      xSemaphoreGive(mtxData);
-    }
-    
-    // Log Local e no Blynk
-    //ESP_LOGI("CALIBRACAO", "Modo de calibracao INICIADO.");
-    queueLogf("Mova o sensor entre os extremos!");
-    
-  } else {
-    // Finaliza a calibração
-    int minSalvar = 0;
-    int maxSalvar = 4095;
-    bool limitesValidos = true;
-
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      gCalibrando = false;
-      
-      // Validação de segurança
-      if (gSensorMin >= gSensorMax) {
-        gSensorMin = 0;
-        gSensorMax = 4095;
-        limitesValidos = false;
-      }
-      
-      minSalvar = gSensorMin;
-      maxSalvar = gSensorMax;
-      xSemaphoreGive(mtxData);
-    }
-
-    if (limitesValidos) {
-      // Grava os novos limites calibrados de forma persistente na memória Flash NVS
-      preferences.begin("my-app", false);
-      preferences.putInt("sensorMin", minSalvar);
-      preferences.putInt("sensorMax", maxSalvar);
-      preferences.end();
-
-      // Log de Sucesso
-      //ESP_LOGI("CALIBRACAO", "Modo de calibracao finalizado: Min=%d, Max=%d", minSalvar, maxSalvar);
-      queueLogf("Calibração ok, limites salvos.   Min: %d | Max: %d", minSalvar, maxSalvar);
-    } else {
-      // Log de Falha/Reset de Segurança
-      //ESP_LOGW("CALIBRACAO", "Limites invalidos detectados. Revertido para o padrao (0-4095).");
-      queueLogf("Cal. falha! Revertido para 0 a 4095");
-    }
-  }
-}
+// Callback do botão de calibracao (V26) com confirmação por tempo.
+BLYNK_WRITE(V26) { gerenciarCallbackBotao(BTN_CALIBRA, param.asInt()); }
 
 //int BotaoRESET = 0; // Mantido caso use em outro local do escopo
 
@@ -949,54 +953,88 @@ void TaskBlynk(void *pv)
                 // Tenta pegar o Mutex para salvar as alterações com segurança
                 if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
                     switch (i) {
-                        case BTN_MANUAL:
-                            gSchedule.remotoOuAgenda = 0;
-                            cicloON = 0; cicloOFF = 0;
+                        case BTN_VALVE_MANUAL:
                             xSemaphoreGive(mtxData);
-                            saveModoToNVS();
-                            queueLogf("Modo MANUAL APP");
+                            aplicarModoValvulaManual(botoes[i].valorAtual == 1);
+                            break;
+
+                        case BTN_CALIBRA:
+                            xSemaphoreGive(mtxData);
+                            if (botoes[i].valorAtual == 1) {
+                              iniciarCalibracaoNivel();
+                            } else {
+                              finalizarCalibracaoNivel();
+                            }
+                            break;
+
+                        case BTN_MANUAL:
+                            if (botoes[i].valorAtual == 1) {
+                              gSchedule.remotoOuAgenda = 0;
+                              cicloON = 0; cicloOFF = 0;
+                              xSemaphoreGive(mtxData);
+                              saveModoToNVS();
+                              queueLogf("Modo MANUAL APP");
+                            } else {
+                              xSemaphoreGive(mtxData);
+                            }
                             break;
 
                         case BTN_AGENDA:
-                            gSchedule.remotoOuAgenda = 1;
-                            cicloON = 0; cicloOFF = 0;
-                            xSemaphoreGive(mtxData);
-                            saveModoToNVS();
-                            queueLogf("Modo AGENDA");
+                            if (botoes[i].valorAtual == 1) {
+                              gSchedule.remotoOuAgenda = 1;
+                              cicloON = 0; cicloOFF = 0;
+                              xSemaphoreGive(mtxData);
+                              saveModoToNVS();
+                              queueLogf("Modo AGENDA");
+                            } else {
+                              xSemaphoreGive(mtxData);
+                            }
                             break;
 
                         case BTN_RESET:
-                            gCmd.requestSetRTC = true;
-                            
-                            // 1. Zera o contador na estrutura global de execução
-                            //gRun.counterRST = 0;
-                            
-                            // 2. Grava o valor zero diretamente na NVS para persistir no boot
-                            preferences.begin("my-app", false); // Ajuste o nome do namespace se for diferente de "my-app"
-                            preferences.putUInt("counterRST", -1); // -1 porque já soma 1 ao reiniciar, então vai ficar 0
-                            preferences.end();
-                            
-                            // 3. Solicita o restart do sistema (WDT vai atuar na TaskRTC)
-                            gCmd.requestRestart = true; 
-                            
-                            xSemaphoreGive(mtxData);
-                            //queueLogf("Reiniciando e zerando RST...");
+                            if (botoes[i].valorAtual == 1) {
+                              gCmd.requestSetRTC = true;
+
+                              // 1. Zera o contador na estrutura global de execução
+                              //gRun.counterRST = 0;
+
+                              // 2. Grava o valor zero diretamente na NVS para persistir no boot
+                              preferences.begin("my-app", false); // Ajuste o nome do namespace se for diferente de "my-app"
+                              preferences.putUInt("counterRST", -1); // -1 porque já soma 1 ao reiniciar, então vai ficar 0
+                              preferences.end();
+
+                              // 3. Solicita o restart do sistema (WDT vai atuar na TaskRTC)
+                              gCmd.requestRestart = true;
+
+                              xSemaphoreGive(mtxData);
+                              //queueLogf("Reiniciando e zerando RST...");
+                            } else {
+                              xSemaphoreGive(mtxData);
+                            }
                             break;
 
                         case BTN_LIGA:
-                            gCmd.forcaLiga = true;
-                            xSemaphoreGive(mtxData);
-                            //queueLogf("Comando LIGAR");
-                            // trava RTC no modo de espera para que o WDT reinicie o sistema
-                            //travarRelogio();
+                            if (botoes[i].valorAtual == 1) {
+                              gCmd.forcaLiga = true;
+                              xSemaphoreGive(mtxData);
+                              //queueLogf("Comando LIGAR");
+                              // trava RTC no modo de espera para que o WDT reinicie o sistema
+                              //travarRelogio();
+                            } else {
+                              xSemaphoreGive(mtxData);
+                            }
                             break;
 
                         case BTN_DESLIGA:
-                            gCmd.forcaDesliga = true;
-                            xSemaphoreGive(mtxData);
-                            //queueLogf("Comando DESLIGAR");
-                            // destrava RTC
-                            //destravarRelogio();
+                            if (botoes[i].valorAtual == 1) {
+                              gCmd.forcaDesliga = true;
+                              xSemaphoreGive(mtxData);
+                              //queueLogf("Comando DESLIGAR");
+                              // destrava RTC
+                              //destravarRelogio();
+                            } else {
+                              xSemaphoreGive(mtxData);
+                            }
                             break;
                     }
                 } else {
