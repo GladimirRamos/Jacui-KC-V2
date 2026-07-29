@@ -29,16 +29,16 @@
 #elif defined(CONFIG_LEVANTE)
   // 2ª Opção: Levante
   int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp = 30;              // Ajuste de calibração da temperatura interna do ESP32
+  int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
   #define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
 
-#elif defined(CONFIG_OPCAO3)
+#elif defined(CONFIG_COQUEIRO)
   // 3ª Opção: Nova Opção (Altere os valores para o seu cenário)
-  int tempoStart = 6;            // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp = 17;              // Ajuste de calibração da temperatura interna do ESP32
-  #define BLYNK_TEMPLATE_ID      "TMPL333333333"
-  #define BLYNK_TEMPLATE_NAME    "Nova Opcao KC"
+  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp    = 10;           // Ajuste de calibração da temperatura interna do ESP32
+  #define BLYNK_TEMPLATE_ID      "TMPL24-0ulxu"
+  #define BLYNK_TEMPLATE_NAME    "Bomba Coqueiro"
 
 #else
   // Caso você esqueça de selecionar um ambiente válido
