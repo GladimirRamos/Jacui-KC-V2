@@ -451,6 +451,7 @@ BLYNK_WRITE(V23) {
 
   if (podeCalibrar) {
     saveValveToNVS();
+    Blynk.virtualWrite(V19, minValve);
   }
 }
 // ajuste Manual da valvula proporcional (0-100%) via APP Blynk, enquanto o botão V22 estiver pressionado
@@ -485,6 +486,7 @@ BLYNK_WRITE(V25) {
 
   if (podeCalibrar) {
     saveValveToNVS();
+    Blynk.virtualWrite(V20, maxValve);
   }
 }
 
@@ -1121,6 +1123,8 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       Blynk.virtualWrite(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
       Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
+      Blynk.virtualWrite(V19, minValve);
+      Blynk.virtualWrite(V20, maxValve);
       Blynk.virtualWrite(V56, runCopy.nivelMedido); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
       Blynk.virtualWrite(V21, dacValveCopy); // <- Publica o valor atual do DAC (0 a 127)
       Blynk.virtualWrite(V29, (~(output_PLC >> 2) & 0x01)); // Bit 2: rele 3/4 (0=ligado, 1=desligado)
