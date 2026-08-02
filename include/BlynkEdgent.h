@@ -3,6 +3,8 @@ extern "C" {
   void app_loop();
 }
 
+extern uint32_t lastAliveBlynk;
+
 #include "Settings.h"
 #include <BlynkSimpleEsp32_SSL.h>
 

@@ -400,6 +400,7 @@ void enterConnectNet() {
   {
     delay(10);
     app_loop();
+    lastAliveBlynk = millis();
 
     if (!BlynkState::is(MODE_CONNECTING_NET)) {
       WiFi.disconnect();
@@ -438,6 +439,7 @@ void enterConnectCloud() {
     delay(10);
     Blynk.run();
     app_loop();
+    lastAliveBlynk = millis();
     if (!BlynkState::is(MODE_CONNECTING_CLOUD)) {
       Blynk.disconnect();
       return;

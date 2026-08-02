@@ -11,6 +11,8 @@
 
   - Comentada a linha 50 em Setings.h para ignorar o warning do LED não configurado
   - Comentada a linha 125 em Indicator.h para ignorar o warning do LED não configurado
+  - >>> LEMBRETE: ajuste em BlynkEdgent.h/ConfigMode.h para manter lastAliveBlynk atualizado nos loops de conexão e
+                  o supervisor aceitar CONNECTING_NET / CONNECTING_CLOUD como atividade válida.
   #define WIFI_CLOUD_MAX_RETRIES        30    // 500 Maximum number of retries to connect to Blynk cloud 
   #define WIFI_NET_CONNECT_TIMEOUT      20000 // 50000 Maximum time to wait for WiFi connection (ms)
   #define WIFI_CLOUD_CONNECT_TIMEOUT    12000 // 50000 Maximum time to wait for Blynk cloud connection (ms)
@@ -997,13 +999,15 @@ void TaskBlynk(void *pv)
                             if (botoes[i].valorAtual == 1) {
                               gCmd.requestSetRTC = true;
 
-                              // 1. Zera o contador na estrutura global de execução
-                              //gRun.counterRST = 0;
-
-                              // 2. Grava o valor zero diretamente na NVS para persistir no boot
+                              // Solicita que o próximo boot reinicie o contador explicitamente em 0.
                               preferences.begin("my-app", false); // Ajuste o nome do namespace se for diferente de "my-app"
-                              preferences.putUInt("counterRST", -1); // -1 porque já soma 1 ao reiniciar, então vai ficar 0
+                              preferences.putBool("counterRSTClearPending", true);
                               preferences.end();
+
+                              if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+                                gRun.counterRST = 0;
+                                xSemaphoreGive(mtxData);
+                              }
 
                               // 3. Solicita o restart do sistema (WDT vai atuar na TaskRTC)
                               gCmd.requestRestart = true;
@@ -1204,27 +1208,36 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
 
 void TaskRTC(void *pv)
 {
+  // A sincronização NTP deixou de ser chamada duas vezes no mesmo fluxo, e o erro do RTC agora só é liberado depois de 3 leituras válidas consecutivas.
+  // Isso reduz falso "RTC ok" quando o barramento oscila e evita a redundância na calibração por NTP.
   LOG_TASK_START(TAG_RTC);
   
   // Mantemos a flag aqui, mas controlamos estritamente suas mudanças
   bool setRTCToday = false; 
   bool logBateriaEnviado = false; // Nova flag para evitar travar o ESP com logs infinitos
   uint8_t lastRtcSecond = 0xFF;
+  uint32_t lastRtcProgressMs = 0;
+  static const uint8_t RTC_RECOVERY_READS = 3;
+  uint8_t rtcRecoveryReads = 0;
 
   for (;;) {
     lastAliveRTC = millis();
 
     DateTime now;
+    bool rtcSecondAdvanced = false;
+    bool rtcSecondsStopped = false;
+    bool rtcLeituraValida = false;
 
     if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
       byte bytesRecebidos = Wire.requestFrom(0x68, 1);
       if (bytesRecebidos == 0) {
+        rtcRecoveryReads = 0;
         xSemaphoreGive(mtxI2C);
+        ESP_LOGW(TAG_RTC, "RTC com barramento travado");
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
           gRun.rtcError = true;
           xSemaphoreGive(mtxData);
         }
-        ESP_LOGW(TAG_RTC, "RTC com barramento travado");
         vTaskDelay(pdMS_TO_TICKS(1000));
         continue;
       }
@@ -1233,26 +1246,41 @@ void TaskRTC(void *pv)
       xSemaphoreGive(mtxI2C);
 
       uint8_t rtcSecond = now.second();
-      bool rtcSecondsStopped = (lastRtcSecond != 0xFF && rtcSecond == lastRtcSecond);
-      lastRtcSecond = rtcSecond;
+      rtcSecondAdvanced = (lastRtcSecond == 0xFF || rtcSecond != lastRtcSecond);
+      if (rtcSecondAdvanced) {
+        lastRtcSecond = rtcSecond;
+        lastRtcProgressMs = millis();
+      }
 
-      // Limpa flag de erro se conseguiu ler o RTC e os segundos continuam avançando
+      rtcSecondsStopped = (lastRtcSecond != 0xFF && !rtcSecondAdvanced && (millis() - lastRtcProgressMs >= 2000UL));
+      rtcLeituraValida = !rtcSecondsStopped && now.year() >= 2026;
+
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-        if (rtcSecondsStopped) {
+        if (!rtcLeituraValida) {
+          rtcRecoveryReads = 0;
           gRun.rtcError = true;
-          ESP_LOGI(TAG_RTC, "RTC travou no segundo: %u", rtcSecond);
-          queueLogf("RTC travou no segundo: %u", rtcSecond);
-        } else if (now.year() < 2026) {
-          gRun.rtcError = true;
-          ESP_LOGI(TAG_RTC, "RTC com ano inválido: %d", now.year());
+
+          if (rtcSecondsStopped) {
+            ESP_LOGI(TAG_RTC, "RTC travou no segundo: %u", rtcSecond);
+            queueLogf("RTC travou no segundo: %u", rtcSecond);
+          } else {
+            ESP_LOGI(TAG_RTC, "RTC com ano inválido: %d", now.year());
+          }
+        } else if (gRun.rtcError) {
+          if (++rtcRecoveryReads >= RTC_RECOVERY_READS) {
+            gRun.rtcError = false;
+            rtcRecoveryReads = 0;
+            ESP_LOGI(TAG_RTC, "RTC recuperado após leituras consecutivas válidas");
+          }
         } else {
-          gRun.rtcError = false;
+          rtcRecoveryReads = 0;
         }
         xSemaphoreGive(mtxData);
       }
     } else {
       ESP_LOGI(TAG_RTC, "Timeout ao acessar I2C para leitura do RTC");
       // Sinaliza erro
+      rtcRecoveryReads = 0;
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
         gRun.rtcError = true;
         xSemaphoreGive(mtxData);
@@ -1297,11 +1325,14 @@ void TaskRTC(void *pv)
 
     // Evita que o log de bateria fraca rode em loop infinito a cada 1 segundo
     // se ano menor e calibração NTP falhar, apenas loga uma vez e espera o ano voltar ao normal para resetar a flag
-    if (t.year < 2026 && setRTCFromNTP()) {
-      setRTCFromNTP();
-      if (!logBateriaEnviado) {
-        queueLogf("Relógio calibrado, ver bateria!");
-        logBateriaEnviado = true;
+    if (t.year < 2026) {
+      if (setRTCFromNTP()) {
+        if (!logBateriaEnviado) {
+          queueLogf("Relógio calibrado, ver bateria!");
+          logBateriaEnviado = true;
+        }
+      } else {
+        logBateriaEnviado = false;
       }
     } else {
       logBateriaEnviado = false; // Reseta se o ano voltar ao normal
@@ -1314,7 +1345,7 @@ void TaskRTC(void *pv)
         queueLogf("Relógio calibrado automaticamente");
         setRTCToday = true;  
         } else {
-          // vai ficar tentando a cada segundo até , mas não vai travar o ESP por 1 minuto, apenas loga a falha 
+          // vai ficar tentando a cada segundo, mas não vai travar o ESP por 1 minuto, apenas loga a falha 
           ESP_LOGE(TAG_RTC, "Tentativa de calibração falhou. Tentando novamente no próximo segundo...");
         }
     }
@@ -2078,8 +2109,7 @@ int outputValve(int nivelRaw, int nivelEscalonado)
 
   // Compartilha o último valor aplicado ao DAC em escala percentual (0 a 100), para enviar ao Blynk.
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
-    VoutValve = map(dacValue, 0, 127, 0, 100)+1;
-    //VoutValve = constrain(VoutValve, 0, 100);
+    VoutValve = constrain(map(dacValue, 0, 127, 0, 100), 0, 100);
     xSemaphoreGive(mtxData);
   }
 
@@ -2277,10 +2307,17 @@ void loadCounterAndMotorState(bool &memMotorState)
 {
   preferences.begin("my-app", false);
 
-  uint32_t counterRST = preferences.getUInt("counterRST", 0);
-  counterRST++;
+  bool clearCounterPending = preferences.getBool("counterRSTClearPending", false);
 
-  preferences.putUInt("counterRST", counterRST);
+  uint32_t counterRST = 0;
+  if (clearCounterPending) {
+    preferences.putUInt("counterRST", 0);
+    preferences.putBool("counterRSTClearPending", false);
+  } else {
+    counterRST = preferences.getUInt("counterRST", 0);
+    counterRST++;
+    preferences.putUInt("counterRST", counterRST);
+  }
 
   memMotorState = preferences.getBool("MemMotorState", true);
 
