@@ -256,6 +256,34 @@ uint32_t lastAliveModbus  = 0;
 uint32_t lastAliveDisplay = 0;
 uint32_t lastAliveIO      = 0;
 
+struct AliveSnapshot {
+  uint32_t blynk;
+  uint32_t rtc;
+  uint32_t modbus;
+  uint32_t display;
+  uint32_t io;
+};
+
+portMUX_TYPE mtxAlive = portMUX_INITIALIZER_UNLOCKED;
+
+static inline void markAlive(uint32_t &marker, uint32_t nowMs) {
+  portENTER_CRITICAL(&mtxAlive);
+  marker = nowMs;
+  portEXIT_CRITICAL(&mtxAlive);
+}
+
+static inline AliveSnapshot getAliveSnapshot() {
+  AliveSnapshot snap;
+  portENTER_CRITICAL(&mtxAlive);
+  snap.blynk = lastAliveBlynk;
+  snap.rtc = lastAliveRTC;
+  snap.modbus = lastAliveModbus;
+  snap.display = lastAliveDisplay;
+  snap.io = lastAliveIO;
+  portEXIT_CRITICAL(&mtxAlive);
+  return snap;
+}
+
 // Variáveis globais para armazenar o tempo gasto (em microssegundos)
 volatile uint32_t tempoTaskBlynk   = 0;
 volatile uint32_t tempoTaskRTC     = 0;
@@ -276,6 +304,52 @@ int gSensorMin   = 0;
 int gSensorMax   = 4095;
 bool gCalibrando = false;
 
+enum PulseType {
+  PULSE_NONE,
+  PULSE_LIGA,
+  PULSE_DESLIGA
+};
+
+enum PulseStep {
+  PULSE_IDLE,
+  PULSE_VALIDATING,
+  PULSE_ACTIVE
+};
+
+struct PulseController {
+  PulseType type;
+  PulseStep step;
+  TickType_t startedAt;
+  TickType_t pulseAt;
+  char reason[24];
+};
+
+PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}};
+
+static bool requestPulse(PulseType type, const char *motivo) {
+  if (type == PULSE_NONE) {
+    return false;
+  }
+
+  if (gPulseCtrl.step != PULSE_IDLE) {
+    ESP_LOGW(TAG_IO, "Pulso ignorado: controlador ocupado (%s)", gPulseCtrl.reason);
+    return false;
+  }
+
+  gPulseCtrl.type = type;
+  gPulseCtrl.step = PULSE_VALIDATING;
+  gPulseCtrl.startedAt = xTaskGetTickCount();
+  gPulseCtrl.pulseAt = 0;
+  strncpy(gPulseCtrl.reason, (motivo && motivo[0] != '\0') ? motivo : "local", sizeof(gPulseCtrl.reason) - 1);
+  gPulseCtrl.reason[sizeof(gPulseCtrl.reason) - 1] = '\0';
+
+  ESP_LOGI(TAG_IO,
+           "Pulso %s solicitado. Motivo=%s",
+           (type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR",
+           gPulseCtrl.reason);
+  return true;
+}
+
 // =====================================================
 // Protótipos
 // =====================================================
@@ -295,6 +369,7 @@ void sendHeartbeatPulse();
 void writeOutputPLC();
 void pulseLiga(const char *motivo);
 void pulseDesliga(const char *motivo);
+void processPulseController();
 
 void queueLogf(const char *fmt, ...);
 bool setRTCFromNTP();
@@ -687,7 +762,7 @@ void vTaskDisplayInit(void *pvParameters) {
         tempoStart--;
     }
 
-    if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(200)) == pdTRUE) {
             display.clearDisplay();
             
             // Cabeçalho da Empresa
@@ -731,6 +806,8 @@ void vTaskDisplayInit(void *pvParameters) {
             
             display.display();
             xSemaphoreGive(mtxI2C);
+          } else {
+            ESP_LOGW(TAG_DISPLAY, "Timeout ao obter mutex I2C no display de inicializacao");
         }
   }
     //  Ao finalizar os 60 segundos, deleta a task para liberar memória
@@ -779,15 +856,18 @@ void setup() {
   ESP_LOGI(TAG_I2C, "I2C iniciado SDA=%d SCL=%d", I2C_SDA, I2C_SCL);
 
   // Inicializa Display OLED
-  if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+  if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(200)) == pdTRUE) {
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
     display.clearDisplay();
     display.display();
     xSemaphoreGive(mtxI2C);
+  } else {
+    ESP_LOGE(TAG_I2C, "Timeout no mutex I2C durante inicializacao do display");
+    failMSG("TIMEOUT DISPLAY");
   }
 
   // Teste PCF8574 saída
-  if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+  if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(200)) == pdTRUE) {
     Wire.beginTransmission(PCF_OUTPUT_ADDR);
     Wire.write(output_PLC);
     int errorCode_OUTPUT = Wire.endTransmission();
@@ -799,11 +879,14 @@ void setup() {
     } else {
       ESP_LOGI(TAG_I2C, "PCF8574 saida OK. Endereco=0x%02X", PCF_OUTPUT_ADDR);
     }
+  } else {
+    ESP_LOGE(TAG_I2C, "Timeout no mutex I2C durante teste do PCF8574 de saida");
+    failMSG("TIMEOUT OUTPUT");
   }
   delay(50);
 
   // Teste PCF8574 entrada
-  if (xSemaphoreTake(mtxI2C, portMAX_DELAY) == pdTRUE) {
+  if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(200)) == pdTRUE) {
     Wire.beginTransmission(PCF_INPUT_ADDR);
     int errorCode_INPUT = Wire.endTransmission();
     xSemaphoreGive(mtxI2C);
@@ -814,6 +897,9 @@ void setup() {
     } else {
       ESP_LOGI(TAG_I2C, "PCF8574 entrada OK. Endereco=0x%02X", PCF_INPUT_ADDR);
     }
+  } else {
+    ESP_LOGE(TAG_I2C, "Timeout no mutex I2C durante teste do PCF8574 de entrada");
+    failMSG("TIMEOUT INPUT");
   }
   delay(50);
 
@@ -945,7 +1031,7 @@ void TaskBlynk(void *pv)
 
   for (;;) {
     BlynkEdgent.run();
-    lastAliveBlynk = millis();
+    markAlive(lastAliveBlynk, millis());
 
     uint32_t now = millis();
 
@@ -1221,7 +1307,7 @@ void TaskRTC(void *pv)
   uint8_t rtcRecoveryReads = 0;
 
   for (;;) {
-    lastAliveRTC = millis();
+    markAlive(lastAliveRTC, millis());
 
     DateTime now;
     bool rtcSecondAdvanced = false;
@@ -1410,7 +1496,7 @@ void TaskIOControl(void *pv)
   uint32_t lastRead = 0;
 
   for (;;) {
-    lastAliveIO = millis();
+    markAlive(lastAliveIO, millis());
 
     uint32_t nowMs = millis();
 
@@ -1575,6 +1661,9 @@ void TaskIOControl(void *pv)
     // Envia todas as alterações de bits feitas acima para o PCF8574 físico
     writeOutputPLC();
 
+    // Processa pulsos sem bloquear a task de I/O.
+    processPulseController();
+
     // Se está em modo local, não comanda via APP/agenda abaixo
     if (inputCopy.modoLocal) {
       vTaskDelay(pdMS_TO_TICKS(50));
@@ -1586,13 +1675,13 @@ void TaskIOControl(void *pv)
       if (cmd.forcaLiga) {
         pulseLiga("APP");
         cicloOFF = 0;
-        ESP_LOGI(TAG_IO, "Pulso LIGAR executado pelo APP");
+        ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado pelo APP");
       }
 
       if (cmd.forcaDesliga) {
         pulseDesliga("APP");
         cicloON = 0;
-        ESP_LOGI(TAG_IO, "Pulso DESLIGAR executado pelo APP");
+        ESP_LOGI(TAG_IO, "Pulso DESLIGAR solicitado pelo APP");
       }
     }
 
@@ -1639,14 +1728,14 @@ void TaskIOControl(void *pv)
         for (; cicloOFF < 1; cicloOFF++) {
           pulseDesliga("agendamento");
           cicloON = 0;
-          ESP_LOGI(TAG_IO, "Pulso DESLIGAR por agendamento");
+          ESP_LOGI(TAG_IO, "Pulso DESLIGAR solicitado por agendamento");
         }
       } else {
         // Fora do horário: LIGA
         for (; cicloON < 1; cicloON++) {
           pulseLiga("agendamento");
           cicloOFF = 0;
-          ESP_LOGI(TAG_IO, "Pulso LIGAR por agendamento");
+          ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado por agendamento");
         }
       }
     }
@@ -1671,7 +1760,7 @@ void TaskDisplay(void *pv)
   static uint32_t ultimoHeartbeatMs = 0;
 
   for (;;) {
-    lastAliveDisplay = millis();
+    markAlive(lastAliveDisplay, millis());
 
     SystemTimeData t;
     RuntimeData r;
@@ -1815,7 +1904,7 @@ void TaskModbus(void *pv) {
   static bool lastModbusError = false;  // Rastreia o estado anterior do erro
 
   for (;;) {
-    lastAliveModbus = millis();
+    markAlive(lastAliveModbus, millis());
 
     // Executa a requisição síncrona (bloqueia apenas esta Task até responder ou dar timeout)
     // Parâmetros: token (millis), serverID (1), functionCode (READ_HOLD_REG), endereço (0x100), quantidade (9)
@@ -1911,6 +2000,7 @@ void TaskSupervisor(void *pv) {
          ciclosWatchdog = 0; // Reseta o contador
 
          uint32_t now = millis();
+         AliveSnapshot alive = getAliveSnapshot();
 
          // 1. Captura o estado atual do Blynk para avaliar a saúde do sistema
          State estadoBlynkAtual = BlynkState::get();
@@ -1935,15 +2025,15 @@ void TaskSupervisor(void *pv) {
          }
          */
          // 2. Cálculo de Saúde isolado para evitar divergências nos logs
-         bool blynkSaudavel = blynkEmConfiguracao || blynkRodandoOnline || (now - lastAliveBlynk < 180000UL);
+        bool blynkSaudavel = blynkEmConfiguracao || blynkRodandoOnline || (now - alive.blynk < 180000UL);
 
          bool ok = 
             !rtcErrorEfetivo &&
             blynkSaudavel &&
-            (now - lastAliveIO      < 10000UL) &&  // 10 segundos para IO
-            (now - lastAliveRTC     < 50000UL) &&  // 50 segundos para RTC
-            (now - lastAliveDisplay < 15000UL) &&  // 15 segundos para Display
-            (now - lastAliveModbus  < 30000UL);    // 30 segundos para Modbus
+          (now - alive.io      < 10000UL) &&  // 10 segundos para IO
+          (now - alive.rtc     < 50000UL) &&  // 50 segundos para RTC
+          (now - alive.display < 15000UL) &&  // 15 segundos para Display
+          (now - alive.modbus  < 30000UL);    // 30 segundos para Modbus
 
         // Em reset forçado, não alimente WDT e não execute diagnóstico pesado.
         if (gForceRtcWdtReset) {
@@ -1966,19 +2056,19 @@ void TaskSupervisor(void *pv) {
                ESP_LOGE(TAG_WDT, "  -> ERRO: RTC_I2C sem resposta física");
             }
             if (!blynkSaudavel) {
-               ESP_LOGE(TAG_WDT, "  -> ERRO: Blynk timeout (%lums)", (unsigned long)(now - lastAliveBlynk));
+              ESP_LOGE(TAG_WDT, "  -> ERRO: Blynk timeout (%lums)", (unsigned long)(now - alive.blynk));
             }
-            if ((now - lastAliveIO) >= 10000UL) {
-               ESP_LOGE(TAG_WDT, "  -> ERRO: IO timeout (%lums)", (unsigned long)(now - lastAliveIO));
+            if ((now - alive.io) >= 10000UL) {
+              ESP_LOGE(TAG_WDT, "  -> ERRO: IO timeout (%lums)", (unsigned long)(now - alive.io));
             }
-            if ((now - lastAliveRTC) >= 50000UL) {
-               ESP_LOGE(TAG_WDT, "  -> ERRO: RTC task timeout (%lums)", (unsigned long)(now - lastAliveRTC));
+            if ((now - alive.rtc) >= 50000UL) {
+              ESP_LOGE(TAG_WDT, "  -> ERRO: RTC task timeout (%lums)", (unsigned long)(now - alive.rtc));
             }
-            if ((now - lastAliveDisplay) >= 15000UL) {
-               ESP_LOGE(TAG_WDT, "  -> ERRO: Display timeout (%lums)", (unsigned long)(now - lastAliveDisplay));
+            if ((now - alive.display) >= 15000UL) {
+              ESP_LOGE(TAG_WDT, "  -> ERRO: Display timeout (%lums)", (unsigned long)(now - alive.display));
             }
-            if ((now - lastAliveModbus) >= 30000UL) {
-               ESP_LOGE(TAG_WDT, "  -> ERRO: Modbus timeout (%lums)", (unsigned long)(now - lastAliveModbus));
+            if ((now - alive.modbus) >= 30000UL) {
+              ESP_LOGE(TAG_WDT, "  -> ERRO: Modbus timeout (%lums)", (unsigned long)(now - alive.modbus));
             }
             
             // --- Identifica dinamicamente as tasks para a telemetria remota com proteção de estouro ---
@@ -1986,10 +2076,10 @@ void TaskSupervisor(void *pv) {
 
             if (rtcErrorEfetivo)                      strncat(tasksTravadas, "RTC_I2C! ", sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
             if (!blynkSaudavel)                       strncat(tasksTravadas, "Blynk! ",   sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
-            if ((now - lastAliveIO)      >= 10000UL)  strncat(tasksTravadas, "IO! ",      sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
-            if ((now - lastAliveRTC)     >= 50000UL)  strncat(tasksTravadas, "RTC! ",     sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
-            if ((now - lastAliveDisplay) >= 15000UL)  strncat(tasksTravadas, "Display! ", sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
-            if ((now - lastAliveModbus)  >= 30000UL)  strncat(tasksTravadas, "Modbus! ",  sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - alive.io)      >= 10000UL)  strncat(tasksTravadas, "IO! ",      sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - alive.rtc)     >= 50000UL)  strncat(tasksTravadas, "RTC! ",     sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - alive.display) >= 15000UL)  strncat(tasksTravadas, "Display! ", sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
+            if ((now - alive.modbus)  >= 30000UL)  strncat(tasksTravadas, "Modbus! ",  sizeof(tasksTravadas) - strlen(tasksTravadas) - 1);
 
             // Envia para o log remoto/fila especificando o culpado exato
             queueLogf("Supervisor timeout: %s", tasksTravadas);
@@ -2130,108 +2220,74 @@ int outputValve(int nivelRaw, int nivelEscalonado)
   return nivelMediaMovel;
 }
 
+void processPulseController() {
+  if (gPulseCtrl.step == PULSE_IDLE || gPulseCtrl.type == PULSE_NONE) {
+    return;
+  }
+
+  TickType_t nowTick = xTaskGetTickCount();
+
+  if (gPulseCtrl.step == PULSE_VALIDATING) {
+    if ((nowTick - gPulseCtrl.startedAt) >= pdMS_TO_TICKS(2500)) {
+      ESP_LOGW(TAG_IO,
+               "Timeout de estabilizacao I2C. Pulso %s cancelado.",
+               (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
+      gPulseCtrl.type = PULSE_NONE;
+      gPulseCtrl.step = PULSE_IDLE;
+      return;
+    }
+
+    bool barramentoOk = false;
+    if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(20)) == pdTRUE) {
+      byte bytesRecebidos = Wire.requestFrom(0x68, 1);
+      xSemaphoreGive(mtxI2C);
+      barramentoOk = (bytesRecebidos > 0);
+    }
+
+    if (!barramentoOk) {
+      ESP_LOGE(TAG_IO,
+               "### FALHA CRÍTICA: BARRAMENTO TRAVADO. PULSO %s ABORTADO! ###",
+               (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
+      gPulseCtrl.type = PULSE_NONE;
+      gPulseCtrl.step = PULSE_IDLE;
+      return;
+    }
+
+    if ((nowTick - gPulseCtrl.startedAt) >= pdMS_TO_TICKS(2000)) {
+      uint8_t pulseBit = (gPulseCtrl.type == PULSE_LIGA) ? 0 : 1;
+      output_PLC &= ~(1 << pulseBit);
+      writeOutputPLC();
+
+      gPulseCtrl.pulseAt = nowTick;
+      gPulseCtrl.step = PULSE_ACTIVE;
+    }
+    return;
+  }
+
+  if (gPulseCtrl.step == PULSE_ACTIVE) {
+    if ((nowTick - gPulseCtrl.pulseAt) >= pdMS_TO_TICKS(1000)) {
+      uint8_t pulseBit = (gPulseCtrl.type == PULSE_LIGA) ? 0 : 1;
+      output_PLC |= (1 << pulseBit);
+      writeOutputPLC();
+
+      queueLogf("Pulso %s por %s", (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR", gPulseCtrl.reason);
+      ESP_LOGI(TAG_IO,
+               "Pulso %s finalizado com sucesso. Motivo=%s",
+               (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR",
+               gPulseCtrl.reason);
+
+      gPulseCtrl.type = PULSE_NONE;
+      gPulseCtrl.step = PULSE_IDLE;
+    }
+  }
+}
+
 void pulseLiga(const char *motivo) {
-    if (motivo == NULL || motivo[0] == '\0') {
-        motivo = "local";  // "sem motivo";
-    }
-
-    //queueLogf("Pulso LIGAR solicitado (%s)", motivo);
-    ESP_LOGI(TAG_IO, "Pulso LIGAR iniciado. Motivo= %s", motivo);
-    
-    // Armazena o momento em que a validação começou
-    uint32_t tempoInicioOk = xTaskGetTickCount(); 
-
-    // O loop monitora o barramento durante a janela de 2 segundos
-    while (true) {
-        bool barramentoOk = false;
-
-        // Tenta pegar o semáforo
-        if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
-            // Testa o barramento
-            byte bytesRecebidos = Wire.requestFrom(0x68, 1); 
-            xSemaphoreGive(mtxI2C);
-
-            // Verifica se houve resposta física no I2C
-            if (bytesRecebidos > 0) {
-                barramentoOk = true;
-            }
-        }
-
-        // SE O BARRAMENTO FALHAR: Aborta o pulso imediatamente
-        if (!barramentoOk) {
-            ESP_LOGE(TAG_IO, "### FALHA CRÍTICA: BARRAMENTO TRAVADO. PULSO LIGAR ABORTADO! ###");
-            return; // Sai da função imediatamente, sem enviar o pulso e sem esperar mais
-        }
-
-        // Se o barramento passou no teste atual, verifica se já completou os 2 segundos de estabilidade
-        if ((xTaskGetTickCount() - tempoInicioOk) >= pdMS_TO_TICKS(2000)) {
-            // Executa o pulso LIGAR (bit 0) após os 2 segundos de sucesso contínuo
-            output_PLC &= ~(1 << 0);
-            writeOutputPLC();
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            output_PLC |= (1 << 0);
-            writeOutputPLC();
-            
-            queueLogf("Pulso LIGAR por %s", motivo);
-            ESP_LOGI(TAG_IO, "Pulso LIGAR finalizado com sucesso. Motivo= %s", motivo);
-            break; // Sai do loop e finaliza a função normalmente
-        }
-
-        // Aguarda 100ms antes de fazer a próxima checagem dentro da janela de 2s
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+  requestPulse(PULSE_LIGA, motivo);
 }
 
 void pulseDesliga(const char *motivo) {
-    if (motivo == NULL || motivo[0] == '\0') {
-        motivo =  "local";  // "sem motivo";
-    }
-
-    //queueLogf("Pulso DESLIGAR solicitado (%s)", motivo);
-    ESP_LOGI(TAG_IO, "Pulso DESLIGAR iniciado. Motivo= %s", motivo);
-    
-    // Armazena o momento em que a validação começou
-    uint32_t tempoInicioOk = xTaskGetTickCount(); 
-
-    // O loop agora serve apenas para monitorar o tempo de estabilização (2 segundos)
-    while (true) {
-        bool barramentoOk = false;
-
-        // Tenta pegar o semáforo
-        if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
-            // Testa o barramento
-            byte bytesRecebidos = Wire.requestFrom(0x68, 1); 
-            xSemaphoreGive(mtxI2C);
-
-            // Verifica se houve resposta física no I2C
-            if (bytesRecebidos > 0) {
-                barramentoOk = true;
-            }
-        }
-
-        // SE O BARRAMENTO FALHAR: Aborta o pulso imediatamente
-        if (!barramentoOk) {
-            ESP_LOGE(TAG_IO, "### FALHA CRÍTICA: BARRAMENTO TRAVADO. PULSO DESLIGAR ABORTADO! ###");
-            return; // Sai da função imediatamente, sem enviar o pulso e sem esperar mais
-        }
-
-        // Se o barramento passou no teste atual, verifica se já completou os 2 segundos de estabilidade
-        if ((xTaskGetTickCount() - tempoInicioOk) >= pdMS_TO_TICKS(2000)) {
-            // Executa o pulso DESLIGAR (bit 1) após os 2 segundos de sucesso contínuo
-            output_PLC &= ~(1 << 1);
-            writeOutputPLC();
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            output_PLC |= (1 << 1);
-            writeOutputPLC();
-            
-            queueLogf("Pulso DESLIGAR por %s", motivo);
-            ESP_LOGI(TAG_IO, "Pulso DESLIGAR finalizado com sucesso. Motivo= %s", motivo);
-            break; // Sai do loop e finaliza a função normalmente
-        }
-
-        // Aguarda 100ms antes de fazer a próxima checagem dentro da janela de 2s
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+  requestPulse(PULSE_DESLIGA, motivo);
 }
 
 
