@@ -322,20 +322,13 @@ struct PulseController {
   TickType_t startedAt;
   TickType_t pulseAt;
   char reason[24];
+  PulseType pendingType;
+  char pendingReason[24];
 };
 
-PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}};
+PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}, PULSE_NONE, {0}};
 
-static bool requestPulse(PulseType type, const char *motivo) {
-  if (type == PULSE_NONE) {
-    return false;
-  }
-
-  if (gPulseCtrl.step != PULSE_IDLE) {
-    ESP_LOGW(TAG_IO, "Pulso ignorado: controlador ocupado (%s)", gPulseCtrl.reason);
-    return false;
-  }
-
+static void startPulseNow(PulseType type, const char *motivo) {
   gPulseCtrl.type = type;
   gPulseCtrl.step = PULSE_VALIDATING;
   gPulseCtrl.startedAt = xTaskGetTickCount();
@@ -347,6 +340,57 @@ static bool requestPulse(PulseType type, const char *motivo) {
            "Pulso %s solicitado. Motivo=%s",
            (type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR",
            gPulseCtrl.reason);
+}
+
+static void tryStartPendingPulse() {
+  if (gPulseCtrl.step != PULSE_IDLE || gPulseCtrl.pendingType == PULSE_NONE) {
+    return;
+  }
+
+  PulseType nextType = gPulseCtrl.pendingType;
+  char nextReason[24];
+  strncpy(nextReason, gPulseCtrl.pendingReason, sizeof(nextReason) - 1);
+  nextReason[sizeof(nextReason) - 1] = '\0';
+
+  gPulseCtrl.pendingType = PULSE_NONE;
+  gPulseCtrl.pendingReason[0] = '\0';
+
+  ESP_LOGI(TAG_IO,
+           "Executando pulso pendente: %s (%s)",
+           (nextType == PULSE_LIGA) ? "LIGAR" : "DESLIGAR",
+           nextReason);
+  startPulseNow(nextType, nextReason);
+}
+
+static bool requestPulse(PulseType type, const char *motivo) {
+  if (type == PULSE_NONE) {
+    return false;
+  }
+
+  if (gPulseCtrl.step != PULSE_IDLE) {
+    if (gPulseCtrl.pendingType == PULSE_NONE) {
+      gPulseCtrl.pendingType = type;
+      strncpy(gPulseCtrl.pendingReason,
+              (motivo && motivo[0] != '\0') ? motivo : "local",
+              sizeof(gPulseCtrl.pendingReason) - 1);
+      gPulseCtrl.pendingReason[sizeof(gPulseCtrl.pendingReason) - 1] = '\0';
+
+      ESP_LOGW(TAG_IO,
+               "Pulso enfileirado: controlador ocupado (%s). Pendente=%s",
+               gPulseCtrl.reason,
+               (type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
+      return true;
+    }
+
+    ESP_LOGW(TAG_IO,
+             "Pulso ignorado: fila pendente cheia. Atual=%s Pendente=%s Novo=%s",
+             gPulseCtrl.reason,
+             (gPulseCtrl.pendingType == PULSE_LIGA) ? "LIGAR" : "DESLIGAR",
+             (type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
+    return false;
+  }
+
+  startPulseNow(type, motivo);
   return true;
 }
 
@@ -923,7 +967,7 @@ void setup() {
     sendHeartbeatPulse();
     delay(200);
   }
-  ESP_LOGI(TAG_WDT, "Hardware Watchdog iniciado - Pulsos de boot OK");
+  ESP_LOGI(TAG_WDT, "Hardware Watchdog iniciado  - Pulsos de boot OK");
 
   // --- NOVA LÓGICA DE TEMPORIZAÇÃO ASSÍNCRONA DE INICIALIZAÇÃO (60s) ---
   ESP_LOGI(TAG_MAIN, "Temporizando inicio do sistema");
@@ -940,10 +984,10 @@ void setup() {
     xSemaphoreGive(mtxI2C); // Libera o semáforo imediatamente após o uso
     
     if (!rtcOk) {
-      ESP_LOGE(TAG_RTC, "Nao foi possivel encontrar o RTC DS1307");
+      ESP_LOGE(TAG_RTC, " Nao foi possivel encontrar o RTC DS1307");
       failMSG("FALHA RTC");
     } else {
-      ESP_LOGI(TAG_RTC, "RTC DS1307 identificado com sucesso");
+      ESP_LOGI(TAG_RTC, " RTC DS1307 identificado com sucesso");
     }
   } 
   else {
@@ -954,7 +998,7 @@ void setup() {
 
   // Inicializa Sincronismo NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  ESP_LOGI(TAG_RTC, "NTP configurado. Servidor=%s GMT offset=%ld daylight=%d", ntpServer, gmtOffset_sec, daylightOffset_sec);
+  ESP_LOGI(TAG_RTC, " NTP configurado. Servidor=%s GMT offset=%ld daylight=%d", ntpServer, gmtOffset_sec, daylightOffset_sec);
 
   // Inicializa setup de calibaração do sensor de nível (NVS)
   preferences.begin("my-app", false);
@@ -1085,15 +1129,14 @@ void TaskBlynk(void *pv)
                             if (botoes[i].valorAtual == 1) {
                               gCmd.requestSetRTC = true;
 
-                              // Solicita que o próximo boot reinicie o contador explicitamente em 0.
-                              preferences.begin("my-app", false); // Ajuste o nome do namespace se for diferente de "my-app"
+                              // Reset intencional: já zera em NVS e mantém a flag para garantir o zero no próximo boot.
+                              preferences.begin("my-app", false);    // Ajuste o nome do namespace se for diferente de "my-app"
+                              preferences.putUInt("counterRST", -1); // -1 porque já soma 1 ao reiniciar, então vai ficar 0
                               preferences.putBool("counterRSTClearPending", true);
                               preferences.end();
 
-                              if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-                                gRun.counterRST = 0;
-                                xSemaphoreGive(mtxData);
-                              }
+                              // Já estamos com mtxData travado neste case, então atualiza direto em RAM.
+                              gRun.counterRST = 0;
 
                               // 3. Solicita o restart do sistema (WDT vai atuar na TaskRTC)
                               gCmd.requestRestart = true;
@@ -2234,6 +2277,7 @@ void processPulseController() {
                (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
       gPulseCtrl.type = PULSE_NONE;
       gPulseCtrl.step = PULSE_IDLE;
+      tryStartPendingPulse();
       return;
     }
 
@@ -2250,6 +2294,7 @@ void processPulseController() {
                (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
       gPulseCtrl.type = PULSE_NONE;
       gPulseCtrl.step = PULSE_IDLE;
+      tryStartPendingPulse();
       return;
     }
 
@@ -2278,6 +2323,7 @@ void processPulseController() {
 
       gPulseCtrl.type = PULSE_NONE;
       gPulseCtrl.step = PULSE_IDLE;
+      tryStartPendingPulse();
     }
   }
 }
@@ -2531,8 +2577,8 @@ void loadValveFromNVS()
   }
 
   ESP_LOGI(TAG_NVS,
-           "Valvula carregada NVS: manual=%d min=%d center=%d max=%d",
-           manualLocal ? 1 : 0,
+           "Valvula carregada NVS: Modo=%d min=%d center=%d max=%d",
+           manualLocal ? "MANUAL" : "AUTO",
            minLocal,
            adjValveLocal,
            maxLocal);
@@ -2545,8 +2591,8 @@ void loadValveFromNVS()
 void restoreMotorState(bool memMotorState)
 {
   ESP_LOGI(TAG_IO,
-           "Restaurando ultimo estado do motor. 1=desligado: %d",
-           memMotorState);
+           "Restaurando ultimo estado do motor: %s",
+           memMotorState ? "Desligado" : "Ligado");
 
   if (memMotorState == false) {
     pulseLiga("memória");
