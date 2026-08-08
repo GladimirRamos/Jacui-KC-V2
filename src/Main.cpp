@@ -17,13 +17,16 @@
   #define WIFI_NET_CONNECT_TIMEOUT      20000 // 50000 Maximum time to wait for WiFi connection (ms)
   #define WIFI_CLOUD_CONNECT_TIMEOUT    12000 // 50000 Maximum time to wait for Blynk cloud connection (ms)
 
+  - em ConfigMode.h, linhas 477-480, comentada a linha que forçava o erro de conexão com o Blynk,
+                     para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
+
   Para controlar uma válvula proporcional de 0-5V usando o ESP32 com Wi-Fi ativo, o MCP4725 é o melhor DAC para o seu projeto.
 
  *************************************************************/
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"

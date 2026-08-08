@@ -474,9 +474,10 @@ void enterConnectCloud() {
       Blynk.sendInternal("meta", "set", "Hotspot Name", systemGetDeviceName());
       Blynk.sendInternal("meta", "set", "Network",      configStore.wifiSSID);
     }
-  } else if (--connectBlynkRetries <= 0) {
-    config_set_last_error(BLYNK_PROV_ERR_CLOUD);
-    BlynkState::set(MODE_ERROR);
+  } else {//if (--connectBlynkRetries <= 0) {
+    //config_set_last_error(BLYNK_PROV_ERR_CLOUD);
+    //BlynkState::set(MODE_ERROR);
+    // Aguarda o proximo loop para tentar novamente, pois o Blynk.run() já faz a reconexão
   }
 }
 
