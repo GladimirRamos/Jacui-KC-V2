@@ -51,7 +51,7 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.3"
+#define BLYNK_FIRMWARE_VERSION "0.1.4"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23
