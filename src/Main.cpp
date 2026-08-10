@@ -2385,7 +2385,7 @@ bool setRTCFromNTP() // Alterado de void para bool
 
   int ho = timeinfo.tm_hour;
   int mi = timeinfo.tm_min;
-  int se = timeinfo.tm_sec + 1;
+  int se = timeinfo.tm_sec;   // era int se = timeinfo.tm_sec + 1;
 
   ESP_LOGI(TAG_RTC,
            "Hora NTP recebida: %02d/%02d/%04d %02d:%02d:%02d",
