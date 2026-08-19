@@ -20,8 +20,6 @@
   - em ConfigMode.h, linhas 477-480, comentada a linha que forçava o erro de conexão com o Blynk,
                      para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
 
-  Para controlar uma válvula proporcional de 0-5V usando o ESP32 com Wi-Fi ativo, o MCP4725 é o melhor DAC para o seu projeto.
-
  *************************************************************/
 
 #ifdef CONFIG_JACUI
