@@ -1672,11 +1672,11 @@ void TaskIOControl(void *pv)
     if (mbCopy.status == 0x00) { // Sensor OK
       double mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0;
 
-      if (mediaCorrente < 25.0 && inputCopy.motorStatus == false) {
+      if (mediaCorrente < 30.0 && inputCopy.motorStatus == false) {
         // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
         output_PLC &= ~(1 << 2); 
         output_PLC &= ~(1 << 3); 
-        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < 25A. Relés 3 e 4 LIGADOS.", mediaCorrente);
+        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < 30A. Relés 3 e 4 LIGADOS.", mediaCorrente);
       } else {
         // Desliga Relé 3 e Relé 4 colocando em nível lógico ALTO (1 = Desligado)
         output_PLC |= (1 << 2);
