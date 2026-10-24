@@ -29,9 +29,9 @@
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
 
-#elif defined(CONFIG_LEVANTE)
+#elif defined(CONFIG_LEVANTE)   // HW de teste em bancada
   // 2ª Opção: Levante
-  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
+  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
   int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
   #define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
   #define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
@@ -1570,8 +1570,9 @@ void TaskIOControl(void *pv)
         in.motorStatus  = inputPCF & (1 << 0); // IN1
         in.modoLocal    = inputPCF & (1 << 1); // IN2
 
-        // 1. Leitura analógica nativa do GPIO36
-        int nivelRaw = analogRead(36);
+        // 1. Leitura analógica nativa do GPIO39 original era GPIO36 (IN1)
+        int nivelRaw = analogRead(39);
+        //ESP_LOGI(TAG_IO, "Leitura analógica do GPIO39: %d", nivelRaw);
 
         int minSensorNivel = 0;
         int maxSensorNivel = 4095;
@@ -1595,8 +1596,8 @@ void TaskIOControl(void *pv)
       // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
       int leituraTratada = constrain(nivelRaw, minSensorNivel, maxSensorNivel);
 
-      // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100)
-      int nivelEscalonado = map(leituraTratada, minSensorNivel, maxSensorNivel, 0, 100);
+      // 4. Mapeia usando a nova escala calibrada (Retorna de 0 a 100 - de forma inversamente proporcional) 
+      int nivelEscalonado = map(leituraTratada, minSensorNivel, maxSensorNivel, 100, 0);
 
       // 4.1 Aplica media movel de amostras e escreve no DAC (GPIO26) de forma inversa.
       // Quanto maior o nivel, menor a saida DAC, chama a função a cada 200ms.
