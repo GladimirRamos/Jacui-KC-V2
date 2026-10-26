@@ -24,22 +24,26 @@
 
 #ifdef CONFIG_JACUI
   // 1ª Opção: Jacuí
-  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
+  // Hardware em teste de bancada
+  int tempoStart          = 60;   // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp             = 30;   // Ajuste de calibração da temperatura interna do ESP32
+  int inputNivelSensorPin = 35;   // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
 
-#elif defined(CONFIG_LEVANTE)   // HW de teste em bancada
+#elif defined(CONFIG_LEVANTE)     // HW LEVANTE EM USO - instalação em 25.10.2026
   // 2ª Opção: Levante
-  int tempoStart = 6;           // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp    = 30;           // Ajuste de calibração da temperatura interna do ESP32
+  int tempoStart          = 60;   // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp             = 30;   // Ajuste de calibração da temperatura interna do ESP32
+  int inputNivelSensorPin = 36;   // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   #define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
   #define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
 
 #elif defined(CONFIG_COQUEIRO)
   // 3ª Opção: Nova Opção (Altere os valores para o seu cenário)
-  int tempoStart = 60;           // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp    = 10;           // Ajuste de calibração da temperatura interna do ESP32
+  int tempoStart          = 60;   // para dar tempo do wi-fi iniciar no roteador externo
+  int calTemp             = 30;   // Ajuste de calibração da temperatura interna do ESP32
+  int inputNivelSensorPin = 35;   // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   #define BLYNK_TEMPLATE_ID      "TMPL24-0ulxu"
   #define BLYNK_TEMPLATE_NAME    "Bomba Coqueiro"
 
@@ -49,7 +53,7 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.4"
+#define BLYNK_FIRMWARE_VERSION "0.1.5"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23
@@ -1570,9 +1574,9 @@ void TaskIOControl(void *pv)
         in.motorStatus  = inputPCF & (1 << 0); // IN1
         in.modoLocal    = inputPCF & (1 << 1); // IN2
 
-        // 1. Leitura analógica nativa do GPIO39 original era GPIO36 (IN1)
-        int nivelRaw = analogRead(39);
-        //ESP_LOGI(TAG_IO, "Leitura analógica do GPIO39: %d", nivelRaw);
+        // 1. Leitura analógica nativa do sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
+        int nivelRaw = analogRead(inputNivelSensorPin);
+        //ESP_LOGI(TAG_IO, "Leitura analógica do sensor de nível: %d", nivelRaw);
 
         int minSensorNivel = 0;
         int maxSensorNivel = 4095;
