@@ -4,6 +4,8 @@ extern "C" {
 }
 
 extern uint32_t lastAliveBlynk;
+void markBlynkAlive();            // atualiza lastAliveBlynk com proteção (definida em Main.cpp)
+void setBlynkOnline(bool online); // publica o estado da conexão para outras tasks (definida em Main.cpp)
 
 #include "Settings.h"
 #include <BlynkSimpleEsp32_SSL.h>

@@ -400,7 +400,7 @@ void enterConnectNet() {
   {
     delay(10);
     app_loop();
-    lastAliveBlynk = millis();
+    markBlynkAlive();
 
     if (!BlynkState::is(MODE_CONNECTING_NET)) {
       WiFi.disconnect();
@@ -419,8 +419,10 @@ void enterConnectNet() {
     connectNetRetries = WIFI_CLOUD_MAX_RETRIES;
     BlynkState::set(MODE_CONNECTING_CLOUD);
   } else if (--connectNetRetries <= 0) {
-    config_set_last_error(BLYNK_PROV_ERR_NETWORK);
-    BlynkState::set(MODE_ERROR);
+    //config_set_last_error(BLYNK_PROV_ERR_NETWORK);
+    //BlynkState::set(MODE_ERROR);
+
+    // Sem limite: o estado continua em CONNECTING_NET e tenta de novo no próximo ciclo
   }
 }
 
@@ -439,7 +441,7 @@ void enterConnectCloud() {
     delay(10);
     Blynk.run();
     app_loop();
-    lastAliveBlynk = millis();
+    markBlynkAlive();
     if (!BlynkState::is(MODE_CONNECTING_CLOUD)) {
       Blynk.disconnect();
       return;

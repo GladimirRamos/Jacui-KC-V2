@@ -11,6 +11,7 @@
 
   - Comentada a linha 50 em Setings.h para ignorar o warning do LED não configurado
   - Comentada a linha 125 em Indicator.h para ignorar o warning do LED não configurado
+
   - >>> LEMBRETE: ajuste em BlynkEdgent.h/ConfigMode.h para manter lastAliveBlynk atualizado nos loops de conexão e
                   o supervisor aceitar CONNECTING_NET / CONNECTING_CLOUD como atividade válida.
   #define WIFI_CLOUD_MAX_RETRIES        30    // 500 Maximum number of retries to connect to Blynk cloud 
@@ -20,32 +21,44 @@
   - em ConfigMode.h, linhas 477-480, comentada a linha que forçava o erro de conexão com o Blynk,
                      para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
 
+   - >>> LEMBRETE:  Ajustes realizados para permitir reconexão automática do Blynk sem reiniciar o ESP em caso de falha de Wi-Fi ou do servidor.
+        em ConfigMode.h, linhas 477-480, comentada a linha que forçava o erro de conexão com o Blynk,
+                     para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
+
+        em ConfigMode.h, função enterConnectNet() (linha ~422), removido o contador de tentativas de conexão Wi-Fi
+                     (else if (--connectNetRetries <= 0) -> MODE_ERROR). Antes, ao esgotar as tentativas o
+                     enterError() reiniciava o ESP. Agora o estado permanece em CONNECTING_NET e tenta
+                     reconectar por tempo indefinido, sem reiniciar o ESP por falha de Wi-Fi ou do servidor.
+
+  
  *************************************************************/
 
-#ifdef CONFIG_JACUI
+#ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
-  // Hardware em teste de bancada
-  int tempoStart          = 60;   // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp             = 30;   // Ajuste de calibração da temperatura interna do ESP32
-  int inputNivelSensorPin = 35;   // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
-  #define BLYNK_TEMPLATE_ID      "TMPL2WSHP95Ku"
-  #define BLYNK_TEMPLATE_NAME    "Jacui KC V2"
+  uint8_t tempoStart          = 6;    // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t calTemp             = 34;    // Ajuste de calibração da temperatura interna do ESP32
+  uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
+  float   setCorrente         = 01.2f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  #define BLYNK_TEMPLATE_ID            "TMPL2WSHP95Ku"
+  #define BLYNK_TEMPLATE_NAME          "Jacui KC V2"
 
-#elif defined(CONFIG_LEVANTE)     // HW LEVANTE EM USO - instalação em 25.10.2026
+#elif defined(CONFIG_LEVANTE)          // HW LEVANTE EM USO - instalação em 25.10.2026
   // 2ª Opção: Levante
-  int tempoStart          = 60;   // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp             = 30;   // Ajuste de calibração da temperatura interna do ESP32
-  int inputNivelSensorPin = 36;   // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
-  #define BLYNK_TEMPLATE_ID      "TMPL21lPiXGc6"
-  #define BLYNK_TEMPLATE_NAME    "Bomba Levante KC"
+  uint8_t tempoStart          = 60;    // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32
+  uint8_t inputNivelSensorPin = 36;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
+  float   setCorrente         = 30.0f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  #define BLYNK_TEMPLATE_ID            "TMPL21lPiXGc6"
+  #define BLYNK_TEMPLATE_NAME          "Bomba Levante KC"
 
-#elif defined(CONFIG_COQUEIRO)
-  // 3ª Opção: Nova Opção (Altere os valores para o seu cenário)
-  int tempoStart          = 60;   // para dar tempo do wi-fi iniciar no roteador externo
-  int calTemp             = 30;   // Ajuste de calibração da temperatura interna do ESP32
-  int inputNivelSensorPin = 35;   // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
-  #define BLYNK_TEMPLATE_ID      "TMPL24-0ulxu"
-  #define BLYNK_TEMPLATE_NAME    "Bomba Coqueiro"
+#elif defined(CONFIG_COQUEIRO)         // HW COQUEIRO EM USO - instalação em 26.10.2026
+  // 3ª Opção: Coqueiro
+  uint8_t tempoStart          = 60;    // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t calTemp             = 15;    // Ajuste de calibração da temperatura interna do ESP32
+  uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
+  float   setCorrente         = 20.0f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  #define BLYNK_TEMPLATE_ID            "TMPL24-0ulxu"
+  #define BLYNK_TEMPLATE_NAME          "Bomba Coqueiro"
 
 #else
   // Caso você esqueça de selecionar um ambiente válido
@@ -53,10 +66,10 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.5"
+#define BLYNK_FIRMWARE_VERSION "0.1.6"
 
 #define USE_ESP32_DEV_MODULE
-#define HEARTBEAT_PIN 23
+#define HEARTBEAT_PIN 23  
 
 #include <WiFi.h>
 #include "time.h"
@@ -216,17 +229,17 @@ struct CommandData {
 };
 
 struct ModbusData {
-  double vR;
-  double vS;
-  double vT;
+  float vR;
+  float vS;
+  float vT;
 
-  double iR;
-  double iS;
-  double iT;
+  float iR;
+  float iS;
+  float iT;
 
-  double pR;
-  double pS;
-  double pT;
+  float pR;
+  float pS;
+  float pT;
 
   uint16_t status;
 };
@@ -275,6 +288,25 @@ static inline void markAlive(uint32_t &marker, uint32_t nowMs) {
   portENTER_CRITICAL(&mtxAlive);
   marker = nowMs;
   portEXIT_CRITICAL(&mtxAlive);
+}
+
+void markBlynkAlive() {
+  markAlive(lastAliveBlynk, millis());
+}
+
+static bool gBlynkOnline = false;
+
+void setBlynkOnline(bool online) {
+  portENTER_CRITICAL(&mtxAlive);
+  gBlynkOnline = online;
+  portEXIT_CRITICAL(&mtxAlive);
+}
+
+static inline bool getBlynkOnline() {
+  portENTER_CRITICAL(&mtxAlive);
+  bool online = gBlynkOnline;
+  portEXIT_CRITICAL(&mtxAlive);
+  return online;
 }
 
 static inline AliveSnapshot getAliveSnapshot() {
@@ -1080,7 +1112,8 @@ void TaskBlynk(void *pv)
 
   for (;;) {
     BlynkEdgent.run();
-    markAlive(lastAliveBlynk, millis());
+    markBlynkAlive();
+    setBlynkOnline(Blynk.connected());
 
     uint32_t now = millis();
 
@@ -1675,13 +1708,13 @@ void TaskIOControl(void *pv)
 
     // --- CONTROLE DOS RELÉS POR CORRENTE (SUPERVISOR INTEGRADO) ---
     if (mbCopy.status == 0x00) { // Sensor OK
-      double mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0;
+      float mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0f;
 
-      if (mediaCorrente < 30.0 && inputCopy.motorStatus == false) {
+      if (mediaCorrente < setCorrente && inputCopy.motorStatus == false) {
         // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
         output_PLC &= ~(1 << 2); 
         output_PLC &= ~(1 << 3); 
-        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < 30A. Relés 3 e 4 LIGADOS.", mediaCorrente);
+        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < %.2fA. Relés 3 e 4 LIGADOS.", mediaCorrente, setCorrente);
       } else {
         // Desliga Relé 3 e Relé 4 colocando em nível lógico ALTO (1 = Desligado)
         output_PLC |= (1 << 2);
@@ -1979,15 +2012,15 @@ void TaskModbus(void *pv) {
       }
 
       // Aplica as suas equações matemáticas originais com base nos registradores lidos
-      mb.vR   = reg[0] / 100.00;
-      mb.vS   = reg[1] / 100.00;
-      mb.vT   = reg[2] / 100.00;
-      mb.iR   = (reg[3] / 100.00); // - 10;
-      mb.iS   = (reg[4] / 100.00); // - 5;
-      mb.iT   = (reg[5] / 100.00); // - 7;
-      mb.pR   = reg[6] / 1000.00;
-      mb.pS   = reg[7] / 1000.00;
-      mb.pT   = reg[8] / 1000.00;
+      mb.vR   = reg[0] / 100.0f;
+      mb.vS   = reg[1] / 100.0f;
+      mb.vT   = reg[2] / 100.0f;
+      mb.iR   = (reg[3] / 100.0f); // - 10;
+      mb.iS   = (reg[4] / 100.0f); // - 5;
+      mb.iT   = (reg[5] / 100.0f); // - 7;
+      mb.pR   = reg[6] / 1000.0f;
+      mb.pS   = reg[7] / 1000.0f;
+      mb.pT   = reg[8] / 1000.0f;
 
       // imprime os valores lidos no log para monitoramento
       /*
@@ -2057,7 +2090,7 @@ void TaskSupervisor(void *pv) {
          
          // Ignora falha de RTC/Timeout enquanto Blynk estiver em configuração/espera por Wi-Fi
          bool blynkEmConfiguracao = (estadoBlynkNum == 0 || estadoBlynkNum == 1); // WAIT CONFIG / CONFIG
-         bool blynkRodandoOnline  = Blynk.connected(); 
+         bool blynkRodandoOnline  = getBlynkOnline();
 
          // Verifica status do RTC de forma thread-safe
          bool rtcError = false;
