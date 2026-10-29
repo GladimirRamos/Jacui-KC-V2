@@ -1,13 +1,14 @@
 #include <Arduino.h>
+#include "esp_arduino_version.h"
 
 /*************************************************************
   Blynk library is licensed under MIT license
  *************************************************************
   Projeto refatorado:
-  - FreeRTOS
-  - BlynkEdgent no Core 1
-  - I/O, RTC, Display, Modbus e Supervisor no Core 0
-  - Logs via esp_log
+  - Rodando sistema operacional de tempo real FreeRTOS
+  - No Core 0: as funções de I/O, RTC, Display, Modbus e Supervisor
+  - No Core 1: a execução do BlynkEdgent, Wi-Fi e conexão com o Blynk Cloud
+  - Logs otimizados com as funções nativas do esp_log
 
   - Comentada a linha 50 em Setings.h para ignorar o warning do LED não configurado
   - Comentada a linha 125 em Indicator.h para ignorar o warning do LED não configurado
@@ -35,10 +36,21 @@
 
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
-  uint8_t tempoStart          = 6;    // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
   uint8_t calTemp             = 34;    // Ajuste de calibração da temperatura interna do ESP32
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 01.2f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  
+  #define BLYNK_HEARTBEAT 10           // timeout de queda = 10 + 18 = 28  s
+  // Os valores padrão são BLYNK_HEARTBEAT = 40 s e BLYNK_TIMEOUT_MS = 6000 ms. 
+  // Então o tempo é 40 s + 18 s = 58 s. 
+  // Antes disso, connected() continua true e o estado permanece RUNNING.
+
+
+  #define BLYNK_PRINT Serial
+  #define APP_DEBUG                    // Ativa mensagens de debug
+  //#define BLYNK_DEBUG                // Ativa mensagens de debug detalhadas do Blynk
+
   #define BLYNK_TEMPLATE_ID            "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME          "Jacui KC V2"
 
@@ -904,6 +916,14 @@ void setup() {
   delay(300);
 
   esp_log_level_set("*", ESP_LOG_INFO);
+ 
+  // Imprime a versão do Arduino Core e SDK do ESP32
+  #ifdef ESP_ARDUINO_VERSION_STR
+   ESP_LOGI(TAG_MAIN, "ESP32 Arduino Core Version: %s", ESP_ARDUINO_VERSION_STR);
+  #else
+   ESP_LOGI(TAG_MAIN, "ESP32 Arduino Core Version: 2.x.x (ou inferior)");
+  #endif
+  ESP_LOGI(TAG_MAIN, "ESP32 SDK Version: %s", ESP.getSdkVersion());
 
   ESP_LOGI(TAG_MAIN, "Inicializando firmware %s", BLYNK_FIRMWARE_VERSION);
   ESP_LOGI(TAG_MAIN, "Setup rodando no core %d", xPortGetCoreID());
