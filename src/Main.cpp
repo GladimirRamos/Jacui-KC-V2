@@ -49,7 +49,8 @@
 
   #define BLYNK_PRINT Serial
   #define APP_DEBUG                    // Ativa mensagens de debug
-  //#define BLYNK_DEBUG                // Ativa mensagens de debug detalhadas do Blynk
+  //  //#define BLYNK_DEBUG                // Ativa mensagens de debug detalhadas do Blynk
+  //#define BLYNK_DEBUG_ALL            // Diagnóstico: mostra "Waiting:" / "Cmd skipped:" do sendCmd
 
   #define BLYNK_TEMPLATE_ID            "TMPL2WSHP95Ku"
   #define BLYNK_TEMPLATE_NAME          "Jacui KC V2"
@@ -78,7 +79,7 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.6"
+#define BLYNK_FIRMWARE_VERSION "0.1.7"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23  
@@ -280,6 +281,8 @@ bool oldMotorOff = true;
 int cicloON  = 0;
 int cicloOFF = 0;
 
+volatile uint8_t gBlynkStage = 0; // diagnóstico: etapa atual da TaskBlynk (1=run, 2=botoes/log, 3=envio rapido, 4=envio modbus)
+volatile int gBlynkPin = -1;      // diagnóstico: pino virtual em escrita (-1 = nenhum)
 uint32_t lastAliveBlynk   = 0;
 uint32_t lastAliveRTC     = 0;
 uint32_t lastAliveModbus  = 0;
@@ -1119,6 +1122,29 @@ void loop()
 // Task Blynk - Core 1
 // =====================================================
 
+// Envia ao Blynk apenas valores alterados; reenvia tudo a cada 30 s para manter o app sincronizado.
+// Reduz o tráfego e evita encher o buffer do socket quando a conexão com o servidor cai sem o ESP perceber.
+#define BLYNK_VW_RESEND_MS 30000UL
+static String   gVwCache[64];
+static uint32_t gVwLastSent[64];
+
+static void blynkWriteIfChanged(int pin, const String &s) {
+  uint32_t now = millis();
+  if (gVwLastSent[pin] != 0 && gVwCache[pin] == s && (now - gVwLastSent[pin]) < BLYNK_VW_RESEND_MS) return;
+  gVwCache[pin] = s;
+  gVwLastSent[pin] = now ? now : 1;
+  gBlynkPin = pin;
+  Blynk.virtualWrite(pin, s);
+  gBlynkPin = -1;
+}
+static void blynkWriteIfChanged(int pin, float v)         { blynkWriteIfChanged(pin, String(v, 3)); }
+static void blynkWriteIfChanged(int pin, const char *v)   { blynkWriteIfChanged(pin, String(v)); }
+static void blynkWriteIfChanged(int pin, int v)           { blynkWriteIfChanged(pin, String(v)); }
+static void blynkWriteIfChanged(int pin, long v)          { blynkWriteIfChanged(pin, String(v)); }
+static void blynkWriteIfChanged(int pin, unsigned long v) { blynkWriteIfChanged(pin, String(v)); }
+static void blynkWriteIfChanged(int pin, uint32_t v)      { blynkWriteIfChanged(pin, String((unsigned long)v)); }
+static void blynkInvalidateCache() { memset(gVwLastSent, 0, sizeof(gVwLastSent)); }
+
 void TaskBlynk(void *pv)
 {
   LOG_TASK_START(TAG_BLYNK);
@@ -1131,9 +1157,26 @@ void TaskBlynk(void *pv)
   LogMessage logMsg;
 
   for (;;) {
+    gBlynkStage = 1;
     BlynkEdgent.run();
     markBlynkAlive();
-    setBlynkOnline(Blynk.connected());
+    gBlynkStage = 2;
+    bool conectado = Blynk.connected();
+    setBlynkOnline(conectado);
+
+    // Log de diagnóstico: imprime apenas quando Blynk.connected() muda
+    // mostrando o status do Wi‑Fi e o número do estado (4 = RUNNING, 3 = CONNECTING_CLOUD, 2 = CONNECTING_NET) 
+    // e o tempo em ms. 
+    // com isso você mede quanto tempo passou entre desconectar o WAN e a queda ser detectada.
+
+    static bool conectadoAnterior = false;
+    if (conectado != conectadoAnterior) {
+      conectadoAnterior = conectado;
+      if (conectado) blynkInvalidateCache(); // reconectou: reenvia todos os valores
+      ESP_LOGW(TAG_BLYNK, "Blynk.connected()=%d WiFi=%d estado=%d t=%lu",
+               conectado, WiFi.status() == WL_CONNECTED,
+               (int)BlynkState::get(), (unsigned long)millis());
+    }
 
     uint32_t now = millis();
 
@@ -1271,6 +1314,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
     // Envio rápido a cada 1000 milisegundos
     if (now - lastSendFast >= 1000) {
       lastSendFast = now;
+      gBlynkStage = 3;
 
       SystemTimeData timeCopy;
       InputData inputCopy;
@@ -1305,25 +1349,25 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       char stateText[24];
       updateBlynkStateText(state, stateText, sizeof(stateText));
 
-      Blynk.virtualWrite(V46, timeCopy.rtcText);
-      Blynk.virtualWrite(V54, runCopy.rssi);
-      Blynk.virtualWrite(V52, runCopy.temp);
-      Blynk.virtualWrite(V53, runCopy.counterRST);
+      blynkWriteIfChanged(V46, timeCopy.rtcText);
+      blynkWriteIfChanged(V54, (int)runCopy.rssi);
+      blynkWriteIfChanged(V52, runCopy.temp);
+      blynkWriteIfChanged(V53, runCopy.counterRST);
 
-      Blynk.virtualWrite(V44, inputCopy.motorStatus ? 0 : 1);
-      Blynk.virtualWrite(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
+      blynkWriteIfChanged(V44, inputCopy.motorStatus ? 0 : 1);
+      blynkWriteIfChanged(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
-      Blynk.virtualWrite(V48, inputCopy.modoLocal ? 1 : 0);
-      Blynk.virtualWrite(V19, minValve);
-      Blynk.virtualWrite(V20, maxValve);
-      Blynk.virtualWrite(V56, runCopy.nivelMedido); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
-      Blynk.virtualWrite(V21, dacValveCopy); // <- Publica o valor atual do DAC (0 a 127)
-      Blynk.virtualWrite(V29, (~(output_PLC >> 2) & 0x01)); // Bit 2: rele 3/4 (0=ligado, 1=desligado)
+      blynkWriteIfChanged(V48, inputCopy.modoLocal ? 1 : 0);
+      blynkWriteIfChanged(V19, minValve);
+      blynkWriteIfChanged(V20, maxValve);
+      blynkWriteIfChanged(V56, runCopy.nivelMedido); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
+      blynkWriteIfChanged(V21, dacValveCopy); // <- Publica o valor atual do DAC (0 a 127)
+      blynkWriteIfChanged(V29, (int)((~(output_PLC >> 2)) & 0x01)); // Bit 2: rele 3/4 (0=ligado, 1=desligado)
 
       if (inputCopy.modoLocal) {
-        Blynk.virtualWrite(V49, 0);
+        blynkWriteIfChanged(V49, 0);
       } else {
-        Blynk.virtualWrite(V49, scheduleCopy.remotoOuAgenda == 0 ? 1 : 2);
+        blynkWriteIfChanged(V49, scheduleCopy.remotoOuAgenda == 0 ? 1 : 2);
       }
 
       ESP_LOGD(TAG_BLYNK,
@@ -1358,6 +1402,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
     // Envio Modbus a cada 3 segundos
     if (now - lastSendSlow >= 3000) {
       lastSendSlow = now;
+      gBlynkStage = 4;
 
       ModbusData mb;
 
@@ -1370,17 +1415,17 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
         continue;
       }
 
-      Blynk.virtualWrite(V30, mb.vR);
-      Blynk.virtualWrite(V31, mb.vS);
-      Blynk.virtualWrite(V32, mb.vT);
+      blynkWriteIfChanged(V30, mb.vR);
+      blynkWriteIfChanged(V31, mb.vS);
+      blynkWriteIfChanged(V32, mb.vT);
 
-      Blynk.virtualWrite(V33, mb.iR);
-      Blynk.virtualWrite(V34, mb.iS);
-      Blynk.virtualWrite(V35, mb.iT);
+      blynkWriteIfChanged(V33, mb.iR);
+      blynkWriteIfChanged(V34, mb.iS);
+      blynkWriteIfChanged(V35, mb.iT);
 
-      Blynk.virtualWrite(V36, mb.pR);
-      Blynk.virtualWrite(V37, mb.pS);
-      Blynk.virtualWrite(V38, mb.pT);
+      blynkWriteIfChanged(V36, mb.pR);
+      blynkWriteIfChanged(V37, mb.pS);
+      blynkWriteIfChanged(V38, mb.pT);
 
       ESP_LOGD(TAG_BLYNK, "Dados Modbus enviados ao Blynk");
     }
@@ -2127,7 +2172,14 @@ void TaskSupervisor(void *pv) {
          }
          */
          // 2. Cálculo de Saúde isolado para evitar divergências nos logs
-        bool blynkSaudavel = blynkEmConfiguracao || blynkRodandoOnline || (now - alive.blynk < 180000UL);
+        if (now - alive.blynk > 3000UL) {
+           ESP_LOGW(TAG_WDT, "TaskBlynk sem avancar ha %lums, etapa=%u pino=V%d conectado=%d estadoRTOS=%d (0=Running 1=Ready 2=Blocked 3=Suspended) WiFi=%d",
+                    (unsigned long)(now - alive.blynk), (unsigned)gBlynkStage, (int)gBlynkPin,
+                    (int)Blynk.connected(),
+                    (int)eTaskGetState(taskBlynkHandle), WiFi.status() == WL_CONNECTED);
+        }
+
+        bool blynkSaudavel =  blynkEmConfiguracao || blynkRodandoOnline || (now - alive.blynk < 180000UL);
 
          bool ok = 
             !rtcErrorEfetivo &&

@@ -430,6 +430,9 @@ void enterConnectCloud() {
   BlynkState::set(MODE_CONNECTING_CLOUD);
 
   Blynk.config(configStore.cloudToken, configStore.cloudHost, configStore.cloudPort);
+  // A biblioteca Blynk passa milissegundos (6000) para WiFiClientSecure::setTimeout(), que espera segundos
+  // (resultado: ~100 min). Isso mantinha a escrita TLS bloqueada quando o servidor deixava de responder.
+  _blynkWifiClient.setTimeout(6);
   Blynk.connect(0);
 
   unsigned long timeoutMs = millis() + WIFI_CLOUD_CONNECT_TIMEOUT;
