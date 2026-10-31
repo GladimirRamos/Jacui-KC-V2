@@ -13,26 +13,28 @@
   - Comentada a linha 50 em Setings.h para ignorar o warning do LED não configurado
   - Comentada a linha 125 em Indicator.h para ignorar o warning do LED não configurado
 
-  - >>> LEMBRETE: ajuste em BlynkEdgent.h/ConfigMode.h para manter lastAliveBlynk atualizado nos loops de conexão e
+  - >>> LEMBRETE: ajuste em BlynkEdgent.h/ConfigMode.h para manter markBlynkAlive atualizado nos loops de conexão e
                   o supervisor aceitar CONNECTING_NET / CONNECTING_CLOUD como atividade válida.
   #define WIFI_CLOUD_MAX_RETRIES        30    // 500 Maximum number of retries to connect to Blynk cloud 
   #define WIFI_NET_CONNECT_TIMEOUT      20000 // 50000 Maximum time to wait for WiFi connection (ms)
   #define WIFI_CLOUD_CONNECT_TIMEOUT    12000 // 50000 Maximum time to wait for Blynk cloud connection (ms)
 
-  - em ConfigMode.h, linhas 477-480, comentada a linha que forçava o erro de conexão com o Blynk,
-                     para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
-
    - >>> LEMBRETE:  Ajustes realizados para permitir reconexão automática do Blynk sem reiniciar o ESP em caso de falha de Wi-Fi ou do servidor.
-        em ConfigMode.h, linhas 477-480, comentada a linha que forçava o erro de conexão com o Blynk,
-                     para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
 
         em ConfigMode.h, função enterConnectNet() (linha ~422), removido o contador de tentativas de conexão Wi-Fi
                      (else if (--connectNetRetries <= 0) -> MODE_ERROR). Antes, ao esgotar as tentativas o
                      enterError() reiniciava o ESP. Agora o estado permanece em CONNECTING_NET e tenta
                      reconectar por tempo indefinido, sem reiniciar o ESP por falha de Wi-Fi ou do servidor.
 
-  
- *************************************************************/
+        em ConfigMode.h, ajuste do timeout do cliente Wi-Fi para evitar bloqueio na escrita TLS quando o servidor não responde.
+                     linha 435 em ConfigMode.h adicionada a chamada _blynkWifiClient.setTimeout(6);
+                     A biblioteca original Blynk passa milissegundos (6000) para WiFiClientSecure::setTimeout(), que espera segundos
+                     (resultado: ~100 min). Isso mantinha a escrita TLS bloqueada quando o servidor deixava de responder (falha de internet).     
+
+        em ConfigMode.h, linhas 482-485, comentada a linha que forçava o erro de conexão com o Blynk,
+                     para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
+
+*************************************************************/
 
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
@@ -41,15 +43,15 @@
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 01.2f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
   
-  #define BLYNK_HEARTBEAT 10           // timeout de queda = 10 + 18 = 28  s
-  // Os valores padrão são BLYNK_HEARTBEAT = 40 s e BLYNK_TIMEOUT_MS = 6000 ms. 
-  // Então o tempo é 40 s + 18 s = 58 s. 
-  // Antes disso, connected() continua true e o estado permanece RUNNING.
+  #define BLYNK_HEARTBEAT 10           // timeout de queda = 28s, ping ao servidor a cada 10s
+  // sem  BLYNK_HEARTBEAT definido     // timeout de queda = 58s, ping ao servidor a cada 40s
+  // padrão: BLYNK_HEARTBEAT = 40s
+  //         BLYNK_TIMEOUT_MS = 6000 ms
+  // cálculo do timeout de queda = 1000 × BLYNK_HEARTBEAT + BLYNK_TIMEOUT_MS × 3  
+  // definido em 10 deixa a reação e a indicação no display mais rápidas
 
-
-  #define BLYNK_PRINT Serial
-  #define APP_DEBUG                    // Ativa mensagens de debug
-  //  //#define BLYNK_DEBUG                // Ativa mensagens de debug detalhadas do Blynk
+  //#define BLYNK_PRINT Serial
+  //#define APP_DEBUG                    // Ativa mensagens de debug detalhadas do Blynk
   //#define BLYNK_DEBUG_ALL            // Diagnóstico: mostra "Waiting:" / "Cmd skipped:" do sendCmd
 
   #define BLYNK_TEMPLATE_ID            "TMPL2WSHP95Ku"
@@ -281,8 +283,6 @@ bool oldMotorOff = true;
 int cicloON  = 0;
 int cicloOFF = 0;
 
-volatile uint8_t gBlynkStage = 0; // diagnóstico: etapa atual da TaskBlynk (1=run, 2=botoes/log, 3=envio rapido, 4=envio modbus)
-volatile int gBlynkPin = -1;      // diagnóstico: pino virtual em escrita (-1 = nenhum)
 uint32_t lastAliveBlynk   = 0;
 uint32_t lastAliveRTC     = 0;
 uint32_t lastAliveModbus  = 0;
@@ -1133,9 +1133,7 @@ static void blynkWriteIfChanged(int pin, const String &s) {
   if (gVwLastSent[pin] != 0 && gVwCache[pin] == s && (now - gVwLastSent[pin]) < BLYNK_VW_RESEND_MS) return;
   gVwCache[pin] = s;
   gVwLastSent[pin] = now ? now : 1;
-  gBlynkPin = pin;
   Blynk.virtualWrite(pin, s);
-  gBlynkPin = -1;
 }
 static void blynkWriteIfChanged(int pin, float v)         { blynkWriteIfChanged(pin, String(v, 3)); }
 static void blynkWriteIfChanged(int pin, const char *v)   { blynkWriteIfChanged(pin, String(v)); }
@@ -1157,25 +1155,15 @@ void TaskBlynk(void *pv)
   LogMessage logMsg;
 
   for (;;) {
-    gBlynkStage = 1;
     BlynkEdgent.run();
     markBlynkAlive();
-    gBlynkStage = 2;
     bool conectado = Blynk.connected();
     setBlynkOnline(conectado);
-
-    // Log de diagnóstico: imprime apenas quando Blynk.connected() muda
-    // mostrando o status do Wi‑Fi e o número do estado (4 = RUNNING, 3 = CONNECTING_CLOUD, 2 = CONNECTING_NET) 
-    // e o tempo em ms. 
-    // com isso você mede quanto tempo passou entre desconectar o WAN e a queda ser detectada.
 
     static bool conectadoAnterior = false;
     if (conectado != conectadoAnterior) {
       conectadoAnterior = conectado;
       if (conectado) blynkInvalidateCache(); // reconectou: reenvia todos os valores
-      ESP_LOGW(TAG_BLYNK, "Blynk.connected()=%d WiFi=%d estado=%d t=%lu",
-               conectado, WiFi.status() == WL_CONNECTED,
-               (int)BlynkState::get(), (unsigned long)millis());
     }
 
     uint32_t now = millis();
@@ -1314,7 +1302,6 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
     // Envio rápido a cada 1000 milisegundos
     if (now - lastSendFast >= 1000) {
       lastSendFast = now;
-      gBlynkStage = 3;
 
       SystemTimeData timeCopy;
       InputData inputCopy;
@@ -1402,7 +1389,6 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
     // Envio Modbus a cada 3 segundos
     if (now - lastSendSlow >= 3000) {
       lastSendSlow = now;
-      gBlynkStage = 4;
 
       ModbusData mb;
 
@@ -2172,13 +2158,6 @@ void TaskSupervisor(void *pv) {
          }
          */
          // 2. Cálculo de Saúde isolado para evitar divergências nos logs
-        if (now - alive.blynk > 3000UL) {
-           ESP_LOGW(TAG_WDT, "TaskBlynk sem avancar ha %lums, etapa=%u pino=V%d conectado=%d estadoRTOS=%d (0=Running 1=Ready 2=Blocked 3=Suspended) WiFi=%d",
-                    (unsigned long)(now - alive.blynk), (unsigned)gBlynkStage, (int)gBlynkPin,
-                    (int)Blynk.connected(),
-                    (int)eTaskGetState(taskBlynkHandle), WiFi.status() == WL_CONNECTED);
-        }
-
         bool blynkSaudavel =  blynkEmConfiguracao || blynkRodandoOnline || (now - alive.blynk < 180000UL);
 
          bool ok = 
