@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <math.h>
 #include "esp_arduino_version.h"
 
 /*************************************************************
@@ -261,6 +262,7 @@ struct ModbusData {
 
 struct RuntimeData {
   long rssi;
+  bool wifiConnected;
   int temp;
   uint32_t counterRST;
   uint32_t blynkState;
@@ -1970,33 +1972,36 @@ void TaskDisplay(void *pv)
         display.print(" ");
         display.print(r.blynkStateText);
 
-        // Barras RSSI
-        long rssi = r.rssi;
-        if (rssi > -55 && rssi < -3) {
-          display.fillRect(40, 25, 4, 17, WHITE);
-          display.fillRect(33, 29, 4, 13, WHITE);
-          display.fillRect(26, 33, 4, 9, WHITE);
-          display.fillRect(19, 37, 4, 5, WHITE);
-        } else if (rssi < -55 && rssi > -70) {
-          display.drawRect(40, 25, 4, 17, WHITE);
-          display.fillRect(33, 29, 4, 13, WHITE);
-          display.fillRect(26, 33, 4, 9, WHITE);
-          display.fillRect(19, 37, 4, 5, WHITE);
-        } else if (rssi < -70 && rssi > -78) {
-          display.drawRect(40, 25, 4, 17, WHITE);
-          display.drawRect(33, 29, 4, 13, WHITE);
-          display.fillRect(26, 33, 4, 9, WHITE);
-          display.fillRect(19, 37, 4, 5, WHITE);
-        } else if (rssi < -78 && rssi > -82) {
-          display.drawRect(40, 25, 4, 17, WHITE);
-          display.drawRect(33, 29, 4, 13, WHITE);
-          display.drawRect(26, 33, 4, 9, WHITE);
-          display.fillRect(19, 37, 4, 5, WHITE);
-        } else {
-          display.drawRect(40, 25, 4, 17, WHITE);
-          display.drawRect(33, 29, 4, 13, WHITE);
-          display.drawRect(26, 33, 4, 9, WHITE);
-          display.drawRect(19, 37, 4, 5, WHITE);
+        // Símbolo Wi-Fi clássico: arcos abertos embaixo e ponto central.
+        const int arcRadii[] = {7, 12, 17};
+        const int arcCount = r.rssi >= -55 ? 3
+                           : r.rssi >= -70 ? 2
+                           : r.rssi >= -82 ? 1
+                           : 0;
+        const int centerX = 29;
+        const int centerY = 40;
+        const bool belowMinimum = !r.wifiConnected || r.rssi >= 0 || r.rssi < -82;
+        display.fillCircle(centerX, centerY, 1, WHITE);
+        for (int i = 0; i < (belowMinimum ? 3 : arcCount); i++) {
+          for (int stroke = 0; stroke < 2; stroke++) {
+            const int radius = arcRadii[i] - stroke;
+            int previousX = centerX + (int)roundf(radius * cosf(36.0f * 0.0174533f));
+            int previousY = centerY - (int)roundf(radius * sinf(36.0f * 0.0174533f));
+            for (int degrees = 39; degrees <= 144; degrees += 3) {
+              const float angle = degrees * 0.0174533f;
+              const int x = centerX + (int)roundf(radius * cosf(angle));
+              const int y = centerY - (int)roundf(radius * sinf(angle));
+              display.drawLine(previousX, previousY, x, y, WHITE);
+              previousX = x;
+              previousY = y;
+            }
+          }
+        }
+        if (belowMinimum) {
+          display.setTextColor(WHITE, BLACK);
+          display.setCursor(centerX + arcRadii[2] - 5, centerY - arcRadii[2]);
+          display.write('X');
+          display.setTextColor(WHITE);
         }
 
         display.display();
@@ -2220,6 +2225,7 @@ void TaskSupervisor(void *pv) {
 
          // 3. Atualização das variáveis globais de telemetria de forma segura
          if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+            gRun.wifiConnected = WiFi.status() == WL_CONNECTED;
             gRun.rssi = WiFi.RSSI();
             gRun.temp = ((temprature_sens_read() - 32) / 1.8) - calTemp; 
             gRun.blynkState = estadoBlynkAtual; 
