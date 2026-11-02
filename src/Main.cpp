@@ -836,7 +836,10 @@ void vTaskDisplayInit(void *pvParameters) {
 
   while (tempoStart > 0) {
     // Mantem o DAC travado em 0 ou 127 durante toda a janela de inicializacao.
-    dacWrite(DAC_OUTPUT_PIN, 0); // 0 (válvula fechada), 127 (válvula aberta)
+    //dacWrite(DAC_OUTPUT_PIN, 0); // 0 (válvula fechada), 127 (válvula aberta)
+    // Desativa o DAC e força o pino a ir para o GND absoluto
+    pinMode(DAC_OUTPUT_PIN, OUTPUT);
+    digitalWrite(DAC_OUTPUT_PIN, LOW);
 
     // Bloqueia a tarefa por 500ms, liberando a CPU
     vTaskDelay(pdMS_TO_TICKS(500)); 
@@ -915,7 +918,10 @@ void vTaskDisplayInit(void *pvParameters) {
 
 void setup() {
   // Mantem o DAC travado em 0 ou 127 durante toda a janela de inicializacao.
-  dacWrite(DAC_OUTPUT_PIN, 0); // 0 (válvula fechada), 127 (válvula aberta)
+  //dacWrite(DAC_OUTPUT_PIN, 0); // 0 (válvula fechada), 127 (válvula aberta)
+  // Desativa o DAC e força o pino a ir para o GND absoluto
+  pinMode(DAC_OUTPUT_PIN, OUTPUT);
+  digitalWrite(DAC_OUTPUT_PIN, LOW);
 
   Serial.begin(115200);
   delay(300);
@@ -1634,6 +1640,35 @@ void TaskIOControl(void *pv)
 
     uint32_t nowMs = millis();
 
+    CommandData cmd;
+    ScheduleData sch;
+    SystemTimeData timeCopy;
+    InputData inputCopy;
+    ModbusData mbCopy;
+
+    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
+      cmd       = gCmd;
+      sch       = gSchedule;
+      timeCopy  = gTime;
+      inputCopy = gInputs;
+      mbCopy    = gModbus;
+
+      gCmd.forcaLiga    = false;
+      gCmd.forcaDesliga = false;
+
+      xSemaphoreGive(mtxData);
+    } else {
+      ESP_LOGW(TAG_IO, "Timeout ao copiar dados compartilhados");
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    float mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0f;
+    bool bloquearValvula =
+      mbCopy.status == 0x00 &&
+      mediaCorrente < setCorrente &&
+      inputCopy.motorStatus == false;
+
     if (nowMs - lastRead >= 200) {
       lastRead = nowMs;
 
@@ -1659,6 +1694,11 @@ void TaskIOControl(void *pv)
         in.raw          = inputPCF;
         in.motorStatus  = inputPCF & (1 << 0); // IN1
         in.modoLocal    = inputPCF & (1 << 1); // IN2
+        inputCopy = in;
+        bloquearValvula =
+          mbCopy.status == 0x00 &&
+          mediaCorrente < setCorrente &&
+          in.motorStatus == false;
 
         // 1. Leitura analógica nativa do sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
         int nivelRaw = analogRead(inputNivelSensorPin);
@@ -1691,7 +1731,7 @@ void TaskIOControl(void *pv)
 
       // 4.1 Aplica media movel de amostras e escreve no DAC (GPIO26) de forma inversa.
       // Quanto maior o nivel, menor a saida DAC, chama a função a cada 200ms.
-      int nivelMediaMovel = outputValve(nivelRaw, nivelEscalonado);
+      int nivelMediaMovel = outputValve(nivelRaw, nivelEscalonado, bloquearValvula);
 
       // 5. Salva de forma segura na estrutura global de execução
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1736,39 +1776,13 @@ void TaskIOControl(void *pv)
       }
     }
 
-    CommandData cmd;
-    ScheduleData sch;
-    SystemTimeData timeCopy;
-    InputData inputCopy;
-    ModbusData mbCopy; // Adicionado para receber os dados do sensor
-
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
-      cmd       = gCmd;
-      sch       = gSchedule;
-      timeCopy  = gTime;
-      inputCopy = gInputs;
-      mbCopy    = gModbus; // Copia os dados do Modbus de forma segura
-
-      gCmd.forcaLiga    = false;
-      gCmd.forcaDesliga = false;
-
-      xSemaphoreGive(mtxData);
-    } else {
-      ESP_LOGW(TAG_IO, "Timeout ao copiar dados compartilhados");
-      vTaskDelay(pdMS_TO_TICKS(50));
-      continue;
-    }
-
     // --- CONTROLE DOS RELÉS POR CORRENTE (SUPERVISOR INTEGRADO) ---
     if (mbCopy.status == 0x00) { // Sensor OK
-      float mediaCorrente = (mbCopy.iR + mbCopy.iS + mbCopy.iT) / 3.0f;
-
-      if (mediaCorrente < setCorrente && inputCopy.motorStatus == false) {
+      if (bloquearValvula) {
         // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
         output_PLC &= ~(1 << 2); 
         output_PLC &= ~(1 << 3); 
-        outputValve(0, 0, true);     // faz o fechamento da válvula por segurança
-        ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < %.2fA. Relés 3 e 4 LIGADOS.", mediaCorrente, setCorrente);
+        //ESP_LOGW(TAG_IO, "Supervisor: Corrente %.2fA < %.2fA. Relés 3 e 4 LIGADOS.", mediaCorrente, setCorrente);
       } else {
         // Desliga Relé 3 e Relé 4 colocando em nível lógico ALTO (1 = Desligado)
         output_PLC |= (1 << 2);
@@ -2264,8 +2278,16 @@ void writeOutputPLC()
 
 int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero)
 {
+ 
+  //ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: %s ", forcarZero ? "true" : "false");
+
   if (forcarZero) {
-    dacWrite(DAC_OUTPUT_PIN, 0); // Saída da válvula fechada por segurança, onde 0 (válvula fechada), 127 (válvula aberta)
+    // Força o GPIO para GND enquanto a válvula estiver bloqueada.
+    dacDisable(DAC_OUTPUT_PIN);
+    pinMode(DAC_OUTPUT_PIN, OUTPUT);
+    digitalWrite(DAC_OUTPUT_PIN, LOW);
+
+    // ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: true");
 
     if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
       VoutValve = 0;
@@ -2275,6 +2297,8 @@ int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero)
     }
     return 0;
   }
+  
+  // ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: false");
 
   // Define a quantidade de amostras como uma constante local
   const int qtdAmostras = 10;
@@ -2371,6 +2395,7 @@ int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero)
   */
   return nivelMediaMovel;
 }
+
 
 void processPulseController() {
   if (gPulseCtrl.step == PULSE_IDLE || gPulseCtrl.type == PULSE_NONE) {
