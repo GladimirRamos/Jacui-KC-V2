@@ -42,7 +42,7 @@
   uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
   uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32 (diminuir sobe no app)
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
-  float   setCorrente         = 01.2f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  float   setCorrente         = 0.1f; // 1.2 A - Corrente média (A) abaixo da qual os relés 3 e 4 são ligados e válvula é fechada
   
   #define BLYNK_HEARTBEAT 10           // timeout de queda = 28s, ping ao servidor a cada 10s
   // sem  BLYNK_HEARTBEAT definido     // timeout de queda = 58s, ping ao servidor a cada 40s
@@ -82,7 +82,7 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.7"
+#define BLYNK_FIRMWARE_VERSION "0.1.8"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23  
@@ -482,7 +482,7 @@ void restoreMotorState(bool memMotorState);
 
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
-int outputValve(int nivelRaw, int nivelEscalonado);
+int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero = false);
 void aplicarModoValvulaManual(bool ativo);
 void iniciarCalibracaoNivel();
 void finalizarCalibracaoNivel();
@@ -835,8 +835,8 @@ void vTaskDisplayInit(void *pvParameters) {
   bool        exibeCoracao = false; // Controla se o coração aparece ou não
 
   while (tempoStart > 0) {
-    // Mantem o DAC travado em 127 durante toda a janela de inicializacao.
-    dacWrite(DAC_OUTPUT_PIN, 127);
+    // Mantem o DAC travado em 0 ou 127 durante toda a janela de inicializacao.
+    dacWrite(DAC_OUTPUT_PIN, 0); // 0 (válvula fechada), 127 (válvula aberta)
 
     // Bloqueia a tarefa por 500ms, liberando a CPU
     vTaskDelay(pdMS_TO_TICKS(500)); 
@@ -914,8 +914,8 @@ void vTaskDisplayInit(void *pvParameters) {
 }
 
 void setup() {
-  // Garante nivel inicial do DAC ao ligar o ESP32.
-  dacWrite(DAC_OUTPUT_PIN, 127);
+  // Mantem o DAC travado em 0 ou 127 durante toda a janela de inicializacao.
+  dacWrite(DAC_OUTPUT_PIN, 0); // 0 (válvula fechada), 127 (válvula aberta)
 
   Serial.begin(115200);
   delay(300);
@@ -932,7 +932,7 @@ void setup() {
 
   ESP_LOGI(TAG_MAIN, "Inicializando firmware %s", BLYNK_FIRMWARE_VERSION);
   ESP_LOGI(TAG_MAIN, "Setup rodando no core %d", xPortGetCoreID());
-  ESP_LOGI(TAG_IO, "  DAC inicializado no GPIO %d com valor %d", DAC_OUTPUT_PIN, 127);
+  ESP_LOGI(TAG_IO, "  DAC inicializado no GPIO %d com valor 0 (válvula fechada)", DAC_OUTPUT_PIN);
 
   initRtcWdt();
 
@@ -1767,6 +1767,7 @@ void TaskIOControl(void *pv)
         // Liga Relé 3 (Bit 2) e Relé 4 (Bit 3) em nível lógico BAIXO (0 = Ligado)
         output_PLC &= ~(1 << 2); 
         output_PLC &= ~(1 << 3); 
+        outputValve(0, 0, true);     // faz o fechamento da válvula por segurança
         ESP_LOGD(TAG_IO, "Supervisor: Corrente %.2fA < %.2fA. Relés 3 e 4 LIGADOS.", mediaCorrente, setCorrente);
       } else {
         // Desliga Relé 3 e Relé 4 colocando em nível lógico ALTO (1 = Desligado)
@@ -2261,8 +2262,20 @@ void writeOutputPLC()
   }
 }
 
-int outputValve(int nivelRaw, int nivelEscalonado)
+int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero)
 {
+  if (forcarZero) {
+    dacWrite(DAC_OUTPUT_PIN, 0); // Saída da válvula fechada por segurança, onde 0 (válvula fechada), 127 (válvula aberta)
+
+    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
+      VoutValve = 0;
+      xSemaphoreGive(mtxData);
+    } else {
+      ESP_LOGW(TAG_IO, "Timeout ao zerar VoutValve na saída da válvula");
+    }
+    return 0;
+  }
+
   // Define a quantidade de amostras como uma constante local
   const int qtdAmostras = 10;
 
