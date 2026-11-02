@@ -40,7 +40,7 @@
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
   uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
-  uint8_t calTemp             = 34;    // Ajuste de calibração da temperatura interna do ESP32
+  uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32 (diminuir sobe no app)
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 01.2f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
   
@@ -2000,7 +2000,7 @@ void TaskDisplay(void *pv)
         if (belowMinimum) {
           display.setTextColor(WHITE, BLACK);
           display.setCursor(centerX + arcRadii[2] - 5, centerY - arcRadii[2]);
-          display.write('X');
+          display.write("X"); // display.print(' X');
           display.setTextColor(WHITE);
         }
 
@@ -2673,7 +2673,7 @@ void loadValveFromNVS()
   }
 
   ESP_LOGI(TAG_NVS,
-           "Valvula carregada NVS: Modo=%d min=%d center=%d max=%d",
+           "Valvula carregada NVS: Modo=%s min=%d center=%d max=%d",
            manualLocal ? "MANUAL" : "AUTO",
            minLocal,
            adjValveLocal,
