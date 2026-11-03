@@ -2278,30 +2278,8 @@ void writeOutputPLC()
 
 int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero)
 {
- 
-  //ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: %s ", forcarZero ? "true" : "false");
-
-  if (forcarZero) {
-    // Força o GPIO para GND enquanto a válvula estiver bloqueada.
-    dacDisable(DAC_OUTPUT_PIN);
-    pinMode(DAC_OUTPUT_PIN, OUTPUT);
-    digitalWrite(DAC_OUTPUT_PIN, LOW);
-
-    // ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: true");
-
-    if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
-      VoutValve = 0;
-      xSemaphoreGive(mtxData);
-    } else {
-      ESP_LOGW(TAG_IO, "Timeout ao zerar VoutValve na saída da válvula");
-    }
-    return 0;
-  }
-  
-  // ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: false");
-
-  // Define a quantidade de amostras como uma constante local
-  const int qtdAmostras = 10;
+  // Realiza o cálculo do nível considerando a média móvel das últimas amostras
+  const int qtdAmostras = 10;  // Define a quantidade de amostras como uma constante local
 
   // O compilador aceita constantes para definir o tamanho de arrays estáticos
   static int amostras[qtdAmostras] = {0};
@@ -2370,29 +2348,50 @@ int outputValve(int nivelRaw, int nivelEscalonado, bool forcarZero)
   }
 
   // Limita a saída dacValue por segurança entre 0 e a máxima de 127
-  dacValue = constrain(dacValue, 0, 127);              
-  dacWrite(DAC_OUTPUT_PIN, dacValue);                  
+  dacValue = constrain(dacValue, 0, 127);
+
+  // If abaixo força a saida para o modo digital LOW, gerando 0V no pino DAC_OUTPUT_PIN.
+  // Recebe o comando via "bloquearValvula" para forçar a saída a zero OU quando o dacValue for abaixo de 1.
+  //ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: %s ", forcarZero ? "true" : "false");
+  if (forcarZero || dacValue <= 1) {
+    // ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: true");
+    // Força o GPIO para GND enquanto forcarZero estiver ativo.
+    dacDisable(DAC_OUTPUT_PIN);
+    pinMode(DAC_OUTPUT_PIN, OUTPUT);
+    digitalWrite(DAC_OUTPUT_PIN, LOW);
+  } else {
+    // ESP_LOGW(TAG_IO, "========================> DEBUG forcarZero: false");
+    dacWrite(DAC_OUTPUT_PIN, dacValue);
+  }
 
   // Compartilha o último valor aplicado ao DAC em escala percentual (0 a 100), para enviar ao Blynk.
   if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(10)) == pdTRUE) {
-    VoutValve = constrain(map(dacValue, 0, 127, 0, 100), 0, 100);
+    VoutValve = forcarZero ? 0 : constrain(map(dacValue, 0, 127, 0, 100), 0, 100);
     xSemaphoreGive(mtxData);
+  } else {
+    ESP_LOGW(TAG_IO, "Timeout ao atualizar VoutValve");
   }
 
-  // Log temporário de diagnóstico (1x por segundo) para validação em campo
+  // Log temporário de diagnóstico (1x por segundo) para validação em campo.
   /*
   uint32_t nowMs = millis();
-  if (nowMs - lastLogMs >= 1000) {
+  if (nowMs - lastLogMs >= 3000) {
     lastLogMs = nowMs;
     ESP_LOGI(TAG_IO,
-             "ADC_RAW=%d | nivelEscalonado=%d | nivelMediaMovel=%d | DAC_GPIO26=%d | ModoManual=%d",
+             "Valvula: ADC_RAW=%d nivel=%d media=%d",
              nivelRaw,
              nivelEscalonado,
-             nivelMediaMovel,
+             nivelMediaMovel);
+    ESP_LOGI(TAG_IO,
+             "Saida: forcarZero=%s tipo=%s DAC_calculado=%d/127 "
+             "VoutValve=%d%% modoManual=%s",
+             forcarZero ? "true" : "false",
+             forcarZero ? "LOW (digital)" : "DAC",
              dacValue,
-             manualValveLocal);
-  }
-  */
+             forcarZero ? 0 : constrain(map(dacValue, 0, 127, 0, 100), 0, 100),
+             manualValveLocal ? "true" : "false");
+  } */
+
   return nivelMediaMovel;
 }
 
