@@ -64,6 +64,7 @@
   uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32
   uint8_t inputNivelSensorPin = 36;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 30.0f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  #define BLYNK_HEARTBEAT 10           // timeout de queda = 28s, ping ao servidor a cada 10s
   #define BLYNK_TEMPLATE_ID            "TMPL21lPiXGc6"
   #define BLYNK_TEMPLATE_NAME          "Bomba Levante KC"
 
@@ -73,6 +74,7 @@
   uint8_t calTemp             = 15;    // Ajuste de calibração da temperatura interna do ESP32
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 20.0f; // Corrente média (A) abaixo da qual os relés 3 e 4 são ligados
+  #define BLYNK_HEARTBEAT 10           // timeout de queda = 28s, ping ao servidor a cada 10s
   #define BLYNK_TEMPLATE_ID            "TMPL24-0ulxu"
   #define BLYNK_TEMPLATE_NAME          "Bomba Coqueiro"
 
