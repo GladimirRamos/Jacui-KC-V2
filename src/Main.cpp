@@ -35,6 +35,22 @@
         em ConfigMode.h, linhas 482-485, comentada a linha que forçava o erro de conexão com o Blynk,
                      para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
 
+
+### MODOS DE OPERAÇÃO ###
+Local     : não envia pulsos de acionamento para ligar ou desligar o motor, tudo é controlado pelo painel.
+
+Manual app: comando de acionamento para ligar ou desligar o motor pelo aplicativo, salva o comando na memória,
+            ao reinicar compara o estado físico, se divergirem, envia ligar ou desligar conforme o registro salvo na memória.
+
+Agenda    : comando de acionamento para desligar o motor conforme o intervalo de hora definido na programação via aplicativo,
+            ao reiniciar ou entrar no modo de agenda, espera leitura válida do hardware PFC e RTC,
+            calcula o estado esperado e envia pulso ligar ou desligar conforme salvo na memória de agendamento, se houver divergência.
+
+*** Ou seja, se estiver ligado não envia pulso para ligar novamente, e se estiver desligado não envia pulso para desligar novamente.
+
+*** Se a leitura inicial do PCF falhar, o controle aguarda uma leitura válida.
+
+
 *************************************************************/
 
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
@@ -84,7 +100,7 @@
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.8"
+#define BLYNK_FIRMWARE_VERSION "0.1.9"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23  
@@ -282,7 +298,7 @@ CommandData    gCmd;
 ModbusData     gModbus;
 RuntimeData    gRun;
 
-bool oldMotorOff = true;
+bool ultimoComandoMotorOff = true;
 
 int cicloON  = 0;
 int cicloOFF = 0;
@@ -378,17 +394,20 @@ struct PulseController {
   TickType_t startedAt;
   TickType_t pulseAt;
   char reason[24];
+  bool appCommand;
   PulseType pendingType;
   char pendingReason[24];
+  bool pendingAppCommand;
 };
 
-PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}, PULSE_NONE, {0}};
+PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}, false, PULSE_NONE, {0}, false};
 
-static void startPulseNow(PulseType type, const char *motivo) {
+static void startPulseNow(PulseType type, const char *motivo, bool appCommand) {
   gPulseCtrl.type = type;
   gPulseCtrl.step = PULSE_VALIDATING;
   gPulseCtrl.startedAt = xTaskGetTickCount();
   gPulseCtrl.pulseAt = 0;
+  gPulseCtrl.appCommand = appCommand;
   strncpy(gPulseCtrl.reason, (motivo && motivo[0] != '\0') ? motivo : "local", sizeof(gPulseCtrl.reason) - 1);
   gPulseCtrl.reason[sizeof(gPulseCtrl.reason) - 1] = '\0';
 
@@ -404,21 +423,23 @@ static void tryStartPendingPulse() {
   }
 
   PulseType nextType = gPulseCtrl.pendingType;
+  bool nextAppCommand = gPulseCtrl.pendingAppCommand;
   char nextReason[24];
   strncpy(nextReason, gPulseCtrl.pendingReason, sizeof(nextReason) - 1);
   nextReason[sizeof(nextReason) - 1] = '\0';
 
   gPulseCtrl.pendingType = PULSE_NONE;
   gPulseCtrl.pendingReason[0] = '\0';
+  gPulseCtrl.pendingAppCommand = false;
 
   ESP_LOGI(TAG_IO,
            "Executando pulso pendente: %s (%s)",
            (nextType == PULSE_LIGA) ? "LIGAR" : "DESLIGAR",
            nextReason);
-  startPulseNow(nextType, nextReason);
+  startPulseNow(nextType, nextReason, nextAppCommand);
 }
 
-static bool requestPulse(PulseType type, const char *motivo) {
+static bool requestPulse(PulseType type, const char *motivo, bool appCommand) {
   if (type == PULSE_NONE) {
     return false;
   }
@@ -426,6 +447,7 @@ static bool requestPulse(PulseType type, const char *motivo) {
   if (gPulseCtrl.step != PULSE_IDLE) {
     if (gPulseCtrl.pendingType == PULSE_NONE) {
       gPulseCtrl.pendingType = type;
+      gPulseCtrl.pendingAppCommand = appCommand;
       strncpy(gPulseCtrl.pendingReason,
               (motivo && motivo[0] != '\0') ? motivo : "local",
               sizeof(gPulseCtrl.pendingReason) - 1);
@@ -446,7 +468,7 @@ static bool requestPulse(PulseType type, const char *motivo) {
     return false;
   }
 
-  startPulseNow(type, motivo);
+  startPulseNow(type, motivo, appCommand);
   return true;
 }
 
@@ -466,9 +488,9 @@ void failMSG(String HW_status);
 void initHeartbeatRmt();
 void sendHeartbeatPulse();
 
-void writeOutputPLC();
-void pulseLiga(const char *motivo);
-void pulseDesliga(const char *motivo);
+bool writeOutputPLC();
+void pulseLiga(const char *motivo, bool appCommand = false);
+void pulseDesliga(const char *motivo, bool appCommand = false);
 void processPulseController();
 
 void queueLogf(const char *fmt, ...);
@@ -480,7 +502,6 @@ void saveScheduleToNVS();
 void saveModoToNVS();
 void saveValveToNVS();
 void loadValveFromNVS();
-void restoreMotorState(bool memMotorState);
 
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
@@ -1045,8 +1066,6 @@ void setup() {
   // Executa o display init de forma síncrona (bloqueando pelo tempoStart)
   vTaskDisplayInit(NULL);
 
-  restoreMotorState(memMotorState);
-
 // Inicializa RTC Externo
   // Define um timeout de 100 milissegundos em vez de esperar para sempre
   if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1203,7 +1222,6 @@ void TaskBlynk(void *pv)
                         case BTN_MANUAL:
                             if (botoes[i].valorAtual == 1) {
                               gSchedule.remotoOuAgenda = 0;
-                              cicloON = 0; cicloOFF = 0;
                               xSemaphoreGive(mtxData);
                               saveModoToNVS();
                               queueLogf("Modo MANUAL APP");
@@ -1215,7 +1233,6 @@ void TaskBlynk(void *pv)
                         case BTN_AGENDA:
                             if (botoes[i].valorAtual == 1) {
                               gSchedule.remotoOuAgenda = 1;
-                              cicloON = 0; cicloOFF = 0;
                               xSemaphoreGive(mtxData);
                               saveModoToNVS();
                               queueLogf("Modo AGENDA");
@@ -1631,11 +1648,45 @@ void TaskRTC(void *pv)
 // Task IO Control - Core 0
 // =====================================================
 
+static bool getScheduledMotorOff(const ScheduleData &schedule,
+                                 const SystemTimeData &time,
+                                 bool &motorOff,
+                                 bool &diaAtivo,
+                                 bool &dentroHorario)
+{
+  if (time.year < 2026 || time.wdayBlynk < 1 || time.wdayBlynk > 7) {
+    return false;
+  }
+
+  char diaAtual[4];
+  snprintf(diaAtual, sizeof(diaAtual), "%d", time.wdayBlynk);
+  diaAtivo = strstr(schedule.diasSemana, diaAtual) != NULL;
+
+  if (schedule.horaLigaSec <= schedule.horaDesligaSec) {
+    dentroHorario =
+      time.secDay >= schedule.horaLigaSec &&
+      time.secDay <= schedule.horaDesligaSec;
+  } else {
+    dentroHorario =
+      time.secDay >= schedule.horaLigaSec ||
+      time.secDay <= schedule.horaDesligaSec;
+  }
+
+  motorOff = diaAtivo && dentroHorario;
+  return true;
+}
+
 void TaskIOControl(void *pv)
 {
   LOG_TASK_START(TAG_IO);
 
   uint32_t lastRead = 0;
+  bool motorInputsInitialized = false;
+  bool startupMotorReconcilePending = true;
+  bool startupMotorAwaitingFeedback = false;
+  bool startupMotorTargetOff = true;
+  bool agendaAtivaAnterior = false;
+  bool agendaReconcilePending = false;
 
   for (;;) {
     markAlive(lastAliveIO, millis());
@@ -1647,6 +1698,9 @@ void TaskIOControl(void *pv)
     SystemTimeData timeCopy;
     InputData inputCopy;
     ModbusData mbCopy;
+    bool rtcErrorCopy = false;
+    bool entradaLida = false;
+    bool controladorLivreNaLeitura = false;
 
     if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
       cmd       = gCmd;
@@ -1654,6 +1708,7 @@ void TaskIOControl(void *pv)
       timeCopy  = gTime;
       inputCopy = gInputs;
       mbCopy    = gModbus;
+      rtcErrorCopy = gRun.rtcError;
 
       gCmd.forcaLiga    = false;
       gCmd.forcaDesliga = false;
@@ -1691,6 +1746,10 @@ void TaskIOControl(void *pv)
       }
 
       if (readOk) {
+        motorInputsInitialized = true;
+        entradaLida = true;
+        controladorLivreNaLeitura =
+          gPulseCtrl.step == PULSE_IDLE && gPulseCtrl.pendingType == PULSE_NONE;
         InputData in;
 
         in.raw          = inputPCF;
@@ -1761,17 +1820,39 @@ void TaskIOControl(void *pv)
                  in.motorStatus ? "DESLIGADO" : "LIGADO",
                  in.modoLocal ? "LOCAL" : "APP");
 
-        // Grava estado do motor somente quando muda
-        if (in.motorStatus != oldMotorOff) {
-          preferences.begin("my-app", false);
-          preferences.putBool("MemMotorState", in.motorStatus);
-          preferences.end();
+        if (startupMotorReconcilePending) {
+          if (in.modoLocal) {
+            startupMotorReconcilePending = false;
+            ESP_LOGI(TAG_IO, "Inicializacao em modo LOCAL; restauracao remota do motor ignorada");
+          } else if (sch.remotoOuAgenda == 0) {
+            startupMotorTargetOff = ultimoComandoMotorOff;
+            if (in.motorStatus != startupMotorTargetOff) {
+              if (startupMotorTargetOff) {
+                pulseDesliga("memoria manual");
+              } else {
+                pulseLiga("memoria manual");
+              }
+              startupMotorAwaitingFeedback = true;
+            }
+            startupMotorReconcilePending = false;
+            ESP_LOGI(TAG_IO,
+                     "Restauracao MANUAL: salvo=%s atual=%s",
+                     startupMotorTargetOff ? "DESLIGADO" : "LIGADO",
+                     in.motorStatus ? "DESLIGADO" : "LIGADO");
+          } else if (sch.remotoOuAgenda == 1) {
+            startupMotorReconcilePending = false;
+          } else {
+            startupMotorReconcilePending = false;
+            ESP_LOGE(TAG_IO, "Modo de operacao invalido (%d); nenhum pulso de inicializacao enviado",
+                     sch.remotoOuAgenda);
+          }
+        }
 
-          oldMotorOff = in.motorStatus;
-
-          ESP_LOGI(TAG_NVS,
-                   "Estado motor gravado na NVS: %s",
-                   in.motorStatus ? "DESLIGADO" : "LIGADO");
+        if (startupMotorAwaitingFeedback) {
+          if (in.motorStatus == startupMotorTargetOff) {
+            startupMotorAwaitingFeedback = false;
+            ESP_LOGI(TAG_IO, "Estado do motor confirmado apos pulso de inicializacao");
+          }
         }
       } else {
         ESP_LOGW(TAG_IO, "Falha ao ler PCF8574 de entrada");
@@ -1816,6 +1897,17 @@ void TaskIOControl(void *pv)
     // Processa pulsos sem bloquear a task de I/O.
     processPulseController();
 
+    if (!motorInputsInitialized) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    bool agendaAtiva = !inputCopy.modoLocal && sch.remotoOuAgenda == 1;
+    if (agendaAtiva != agendaAtivaAnterior) {
+      agendaAtivaAnterior = agendaAtiva;
+      agendaReconcilePending = agendaAtiva;
+    }
+
     // Se está em modo local, não comanda via APP/agenda abaixo
     if (inputCopy.modoLocal) {
       vTaskDelay(pdMS_TO_TICKS(50));
@@ -1825,13 +1917,13 @@ void TaskIOControl(void *pv)
     // Modo manual APP
     if (sch.remotoOuAgenda == 0) {
       if (cmd.forcaLiga) {
-        pulseLiga("APP");
+        pulseLiga("APP", true);
         cicloOFF = 0;
         ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado pelo APP");
       }
 
       if (cmd.forcaDesliga) {
-        pulseDesliga("APP");
+        pulseDesliga("APP", true);
         cicloON = 0;
         ESP_LOGI(TAG_IO, "Pulso DESLIGAR solicitado pelo APP");
       }
@@ -1840,25 +1932,22 @@ void TaskIOControl(void *pv)
     // Modo agenda
     if (sch.remotoOuAgenda == 1) {
       bool diaAtivo = false;
+      bool dentroHorario = false;
+      bool motorOffEsperado = false;
 
-      char diaAtual[4];
-      snprintf(diaAtual, sizeof(diaAtual), "%d", timeCopy.wdayBlynk);
-
-      if (strstr(sch.diasSemana, diaAtual) != NULL) {
-        diaAtivo = true;
+      if (agendaReconcilePending &&
+          (!entradaLida || !controladorLivreNaLeitura ||
+           gPulseCtrl.step != PULSE_IDLE ||
+           gPulseCtrl.pendingType != PULSE_NONE)) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        continue;
       }
 
-      bool dentroHorario = false;
-
-      if (sch.horaLigaSec <= sch.horaDesligaSec) {
-        dentroHorario =
-          timeCopy.secDay >= sch.horaLigaSec &&
-          timeCopy.secDay <= sch.horaDesligaSec;
-      } else {
-        // Agenda atravessando meia-noite
-        dentroHorario =
-          timeCopy.secDay >= sch.horaLigaSec ||
-          timeCopy.secDay <= sch.horaDesligaSec;
+      if (rtcErrorCopy ||
+          !getScheduledMotorOff(sch, timeCopy, motorOffEsperado, diaAtivo, dentroHorario)) {
+        ESP_LOGW(TAG_IO, "RTC indisponivel ou horario invalido. Ignorando controle por agenda.");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        continue;
       }
 
       ESP_LOGD(TAG_IO,
@@ -1870,12 +1959,25 @@ void TaskIOControl(void *pv)
                (unsigned long)sch.horaDesligaSec,
                sch.diasSemana);
 
-      if (gRun.rtcError) {
-        ESP_LOGW(TAG_IO, "RTC com erro. Ignorando controle por agenda.");
-        vTaskDelay(pdMS_TO_TICKS(10000));
-        continue;
+      if (agendaReconcilePending) {
+        if (inputCopy.motorStatus != motorOffEsperado) {
+          PulseType comando = motorOffEsperado ? PULSE_DESLIGA : PULSE_LIGA;
+          if (!requestPulse(comando, "entrada agenda", false)) {
+            ESP_LOGW(TAG_IO, "Nao foi possivel solicitar pulso ao entrar em AGENDA");
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+          }
+        }
+
+        cicloOFF = motorOffEsperado ? 1 : 0;
+        cicloON = motorOffEsperado ? 0 : 1;
+        agendaReconcilePending = false;
+        ESP_LOGI(TAG_IO, "Entrada em AGENDA: esperado=%s atual=%s",
+                 motorOffEsperado ? "DESLIGADO" : "LIGADO",
+                 inputCopy.motorStatus ? "DESLIGADO" : "LIGADO");
       }
-      if (diaAtivo && dentroHorario) {
+
+      if (motorOffEsperado) {
         // Dentro do horário: DESLIGA
         for (; cicloOFF < 1; cicloOFF++) {
           pulseDesliga("agendamento");
@@ -2259,7 +2361,7 @@ void TaskSupervisor(void *pv) {
 // Saídas PCF8574
 // =====================================================
 
-void writeOutputPLC()
+bool writeOutputPLC()
 {
   if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
     Wire.beginTransmission(PCF_OUTPUT_ADDR);
@@ -2270,11 +2372,14 @@ void writeOutputPLC()
 
     if (err != 0) {
       ESP_LOGW(TAG_IO, "Falha escrita PCF saida. Erro=%d output=0x%02X", err, output_PLC);
+      return false;
     } else {
       ESP_LOGD(TAG_IO, "PCF saida atualizado: 0x%02X", output_PLC);
+      return true;
     }
   } else {
     ESP_LOGW(TAG_IO, "Timeout ao acessar I2C para escrita PCF saida");
+    return false;
   }
 }
 
@@ -2434,12 +2539,50 @@ void processPulseController() {
     }
 
     if ((nowTick - gPulseCtrl.startedAt) >= pdMS_TO_TICKS(2000)) {
+      bool salvarComandoApp = false;
+      if (gPulseCtrl.appCommand) {
+        if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) != pdTRUE) {
+          ESP_LOGW(TAG_IO, "Timeout ao verificar modo; pulso APP cancelado");
+          gPulseCtrl.type = PULSE_NONE;
+          gPulseCtrl.step = PULSE_IDLE;
+          tryStartPendingPulse();
+          return;
+        }
+        salvarComandoApp = !gInputs.modoLocal && gSchedule.remotoOuAgenda == 0;
+        xSemaphoreGive(mtxData);
+      }
+
       uint8_t pulseBit = (gPulseCtrl.type == PULSE_LIGA) ? 0 : 1;
       output_PLC &= ~(1 << pulseBit);
-      writeOutputPLC();
+      if (!writeOutputPLC()) {
+        output_PLC |= (1 << pulseBit);
+        ESP_LOGE(TAG_IO, "Falha ao enviar pulso %s; comando nao salvo",
+                 (gPulseCtrl.type == PULSE_LIGA) ? "LIGAR" : "DESLIGAR");
+        gPulseCtrl.type = PULSE_NONE;
+        gPulseCtrl.step = PULSE_IDLE;
+        tryStartPendingPulse();
+        return;
+      }
 
       gPulseCtrl.pulseAt = nowTick;
       gPulseCtrl.step = PULSE_ACTIVE;
+
+      if (salvarComandoApp) {
+        bool motorOff = gPulseCtrl.type == PULSE_DESLIGA;
+        if (!preferences.begin("my-app", false)) {
+          ESP_LOGE(TAG_NVS, "Falha ao abrir NVS para salvar comando do motor");
+        } else {
+          size_t bytesWritten = preferences.putBool("MemMotorState", motorOff);
+          preferences.end();
+          if (bytesWritten == 0) {
+            ESP_LOGE(TAG_NVS, "Falha ao salvar comando do motor na NVS");
+          } else {
+            ultimoComandoMotorOff = motorOff;
+            ESP_LOGI(TAG_NVS, "Comando do motor gravado na NVS: %s",
+                     motorOff ? "DESLIGAR" : "LIGAR");
+          }
+        }
+      }
     }
     return;
   }
@@ -2463,12 +2606,12 @@ void processPulseController() {
   }
 }
 
-void pulseLiga(const char *motivo) {
-  requestPulse(PULSE_LIGA, motivo);
+void pulseLiga(const char *motivo, bool appCommand) {
+  requestPulse(PULSE_LIGA, motivo, appCommand);
 }
 
-void pulseDesliga(const char *motivo) {
-  requestPulse(PULSE_DESLIGA, motivo);
+void pulseDesliga(const char *motivo, bool appCommand) {
+  requestPulse(PULSE_DESLIGA, motivo, appCommand);
 }
 
 
@@ -2566,7 +2709,7 @@ void loadCounterAndMotorState(bool &memMotorState)
     xSemaphoreGive(mtxData);
   }
 
-  oldMotorOff = memMotorState;
+  ultimoComandoMotorOff = memMotorState;
 
   ESP_LOGI(TAG_NVS,
            "NVS carregada: counterRST=%lu MemMotorState=%s",
@@ -2717,27 +2860,6 @@ void loadValveFromNVS()
            minLocal,
            adjValveLocal,
            maxLocal);
-}
-
-// =====================================================
-// Restauração do estado do motor
-// =====================================================
-
-void restoreMotorState(bool memMotorState)
-{
-  ESP_LOGI(TAG_IO,
-           "Restaurando ultimo estado do motor: %s",
-           memMotorState ? "Desligado" : "Ligado");
-
-  if (memMotorState == false) {
-    pulseLiga("memória");
-    cicloOFF = 0;
-    ESP_LOGI(TAG_IO, "Motor ativado pela memoria");
-  } else {
-    pulseDesliga("memória");
-    cicloON = 0;
-    ESP_LOGI(TAG_IO, "Motor desativado pela memoria");
-  }
 }
 
 // =====================================================
