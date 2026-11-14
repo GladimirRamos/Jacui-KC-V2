@@ -35,6 +35,10 @@
         em ConfigMode.h, linhas 482-485, comentada a linha que forçava o erro de conexão com o Blynk,
                      para permitir que o Blynk.run() faça a reconexão automaticamente por tempo indefinido.
 
+- >>> LEMBRETE: Gravar configurações na memória não volátil (NVS) no primeiro boot:
+                * valores dos ajustes de mínima, máxima e centro dos ajustes da valvula propocional
+                * valores dos ajustes de mínima e máxima do controle de nivel
+                * programação de agenda (intervalos de acionamento)
 
 ### MODOS DE OPERAÇÃO ###
 Local     : não envia pulsos de acionamento para ligar ou desligar o motor, tudo é controlado pelo painel.
@@ -100,7 +104,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.1.9"
+#define BLYNK_FIRMWARE_VERSION "0.2.1"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23  
@@ -370,6 +374,10 @@ int minValve        = 0;
 int maxValve        = 100;
 int adjValve        = 127;
 int VoutValve       = 0;
+// Variaveis globais para controle do motor em função do nivelMedido pelo sensor de nível
+bool Float_Level_CNTRL_Status_ON_OFF = false;
+uint8_t Float_Level_MIN = 0;
+uint8_t Float_Level_MAX = 100;
 
 // Variáveis globais de controle de calibração dinâmica do sensor de nível
 int gSensorMin   = 0;
@@ -395,12 +403,13 @@ struct PulseController {
   TickType_t pulseAt;
   char reason[24];
   bool appCommand;
+  bool floatLevelCommand;
   PulseType pendingType;
   char pendingReason[24];
   bool pendingAppCommand;
 };
 
-PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}, false, PULSE_NONE, {0}, false};
+PulseController gPulseCtrl = {PULSE_NONE, PULSE_IDLE, 0, 0, {0}, false, false, PULSE_NONE, {0}, false};
 
 static void startPulseNow(PulseType type, const char *motivo, bool appCommand) {
   gPulseCtrl.type = type;
@@ -408,6 +417,7 @@ static void startPulseNow(PulseType type, const char *motivo, bool appCommand) {
   gPulseCtrl.startedAt = xTaskGetTickCount();
   gPulseCtrl.pulseAt = 0;
   gPulseCtrl.appCommand = appCommand;
+  gPulseCtrl.floatLevelCommand = false;
   strncpy(gPulseCtrl.reason, (motivo && motivo[0] != '\0') ? motivo : "local", sizeof(gPulseCtrl.reason) - 1);
   gPulseCtrl.reason[sizeof(gPulseCtrl.reason) - 1] = '\0';
 
@@ -492,6 +502,9 @@ bool writeOutputPLC();
 void pulseLiga(const char *motivo, bool appCommand = false);
 void pulseDesliga(const char *motivo, bool appCommand = false);
 void processPulseController();
+void FloatLevelSensorControl(int nivelMedido, bool motorDesligado,
+                             uint8_t nivelMin, uint8_t nivelMax,
+                             PulseType &ultimoPulsoNivel);
 
 void queueLogf(const char *fmt, ...);
 bool setRTCFromNTP();
@@ -502,6 +515,7 @@ void saveScheduleToNVS();
 void saveModoToNVS();
 void saveValveToNVS();
 void loadValveFromNVS();
+void saveFloatLevelControlToNVS(bool ativo);
 
 const char *resetReasonName(esp_reset_reason_t r);
 void updateBlynkStateText(uint32_t state, char *buffer, size_t len);
@@ -526,6 +540,8 @@ enum TipoBotao {
   BTN_RESET,
   BTN_LIGA,
   BTN_DESLIGA,
+  BTN_Float_Level_CMD_ON,
+  BTN_Float_Level_CMD_OFF,
   BTN_COUNT
 };
 
@@ -545,7 +561,9 @@ ControleBotao botoes[BTN_COUNT] = {
   {28, 0, false, 0}, // BTN_AGENDA
   {39, 0, false, 0}, // BTN_RESET
   {41, 0, false, 0}, // BTN_LIGA
-  {42, 0, false, 0}  // BTN_DESLIGA
+  {42, 0, false, 0}, // BTN_DESLIGA
+  {15, 0, false, 0}, // BTN_Float_Level_CMD_ON
+  {16, 0, false, 0}  // BTN_Float_Level_CMD_OFF
 };
 
 // Função auxiliar para iniciar a contagem do botão
@@ -701,6 +719,66 @@ BLYNK_WRITE(V39) {
 }
 BLYNK_WRITE(V41) { gerenciarCallbackBotao(BTN_LIGA, param.asInt()); }
 BLYNK_WRITE(V42) { gerenciarCallbackBotao(BTN_DESLIGA, param.asInt()); }
+BLYNK_WRITE(V15) { gerenciarCallbackBotao(BTN_Float_Level_CMD_ON, param.asInt()); }
+BLYNK_WRITE(V16) { gerenciarCallbackBotao(BTN_Float_Level_CMD_OFF, param.asInt()); }
+
+BLYNK_WRITE(V17) {
+  int valor = param.asInt();
+  if (valor < 0 || valor > UINT8_MAX) {
+    ESP_LOGW(TAG_BLYNK, "Valor invalido recebido em V17: %d", valor);
+    return;
+  }
+
+  uint8_t valorNivel = static_cast<uint8_t>(valor);
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) != pdTRUE) {
+    ESP_LOGW(TAG_BLYNK, "Timeout ao atualizar Float_Level_MIN");
+    return;
+  }
+  Float_Level_MIN = valorNivel;
+  xSemaphoreGive(mtxData);
+
+  if (!preferences.begin("my-app", false)) {
+    ESP_LOGE(TAG_NVS, "Falha ao abrir NVS para salvar Float_Level_MIN");
+    return;
+  }
+  size_t bytesWritten = preferences.putUChar("floatLvlMin", valorNivel);
+  preferences.end();
+
+  if (bytesWritten != sizeof(valorNivel)) {
+    ESP_LOGE(TAG_NVS, "Falha ao salvar Float_Level_MIN na NVS");
+    return;
+  }
+  ESP_LOGI(TAG_NVS, "Float_Level_MIN salvo na NVS: %u", (unsigned)valorNivel);
+}
+
+BLYNK_WRITE(V18) {
+  int valor = param.asInt();
+  if (valor < 0 || valor > UINT8_MAX) {
+    ESP_LOGW(TAG_BLYNK, "Valor invalido recebido em V18: %d", valor);
+    return;
+  }
+
+  uint8_t valorNivel = static_cast<uint8_t>(valor);
+  if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) != pdTRUE) {
+    ESP_LOGW(TAG_BLYNK, "Timeout ao atualizar Float_Level_MAX");
+    return;
+  }
+  Float_Level_MAX = valorNivel;
+  xSemaphoreGive(mtxData);
+
+  if (!preferences.begin("my-app", false)) {
+    ESP_LOGE(TAG_NVS, "Falha ao abrir NVS para salvar Float_Level_MAX");
+    return;
+  }
+  size_t bytesWritten = preferences.putUChar("floatLvlMax", valorNivel);
+  preferences.end();
+
+  if (bytesWritten != sizeof(valorNivel)) {
+    ESP_LOGE(TAG_NVS, "Falha ao salvar Float_Level_MAX na NVS");
+    return;
+  }
+  ESP_LOGI(TAG_NVS, "Float_Level_MAX salvo na NVS: %u", (unsigned)valorNivel);
+}
 
 
 BLYNK_WRITE(V40)
@@ -961,7 +1039,7 @@ void setup() {
 
   ESP_LOGI(TAG_MAIN, "Inicializando firmware %s", BLYNK_FIRMWARE_VERSION);
   ESP_LOGI(TAG_MAIN, "Setup rodando no core %d", xPortGetCoreID());
-  ESP_LOGI(TAG_IO, "  DAC inicializado no GPIO %d com valor 0 (válvula fechada)", DAC_OUTPUT_PIN);
+  ESP_LOGI(TAG_IO, "  DAC inicializado no GPIO %d com valor 0 (Válvula Proporcional fechada)", DAC_OUTPUT_PIN);
 
   initRtcWdt();
 
@@ -1172,6 +1250,11 @@ static void blynkWriteIfChanged(int pin, unsigned long v) { blynkWriteIfChanged(
 static void blynkWriteIfChanged(int pin, uint32_t v)      { blynkWriteIfChanged(pin, String((unsigned long)v)); }
 static void blynkInvalidateCache() { memset(gVwLastSent, 0, sizeof(gVwLastSent)); }
 
+static void atualizarPropriedadesNivel(bool ativo) {
+  Blynk.setProperty(V17, "isDisabled", ativo ? "true" : "false");
+  Blynk.setProperty(V18, "isDisabled", ativo ? "true" : "false");
+}
+
 void TaskBlynk(void *pv)
 {
   LOG_TASK_START(TAG_BLYNK);
@@ -1192,7 +1275,10 @@ void TaskBlynk(void *pv)
     static bool conectadoAnterior = false;
     if (conectado != conectadoAnterior) {
       conectadoAnterior = conectado;
-      if (conectado) blynkInvalidateCache(); // reconectou: reenvia todos os valores
+      if (conectado) {
+        blynkInvalidateCache(); // reconectou: reenvia todos os valores
+        atualizarPropriedadesNivel(Float_Level_CNTRL_Status_ON_OFF);
+      }
     }
 
     uint32_t now = millis();
@@ -1287,6 +1373,22 @@ void TaskBlynk(void *pv)
                               xSemaphoreGive(mtxData);
                             }
                             break;
+
+                        case BTN_Float_Level_CMD_ON:
+                        case BTN_Float_Level_CMD_OFF: {
+                            if (botoes[i].valorAtual == 1) {
+                              bool ativo = i == BTN_Float_Level_CMD_ON;
+                              Float_Level_CNTRL_Status_ON_OFF = ativo;
+                              xSemaphoreGive(mtxData);
+                              saveFloatLevelControlToNVS(ativo);
+                              blynkWriteIfChanged(V14, ativo ? 1 : 0);
+                              atualizarPropriedadesNivel(ativo);
+                              queueLogf(ativo ? "Ativado controle de Nível Min/Max" : "Desativado controle de Nível Min/Max");
+                            } else {
+                              xSemaphoreGive(mtxData);
+                            }
+                            break;
+                        }
                     }
                 } else {
                     ESP_LOGW(TAG_BLYNK, "Timeout ao tentar aplicar comando do botao V%d", botoes[i].virtualPin);
@@ -1372,6 +1474,7 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       blynkWriteIfChanged(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
       blynkWriteIfChanged(V48, inputCopy.modoLocal ? 1 : 0);
+      blynkWriteIfChanged(V14, Float_Level_CNTRL_Status_ON_OFF ? 1 : 0);
       blynkWriteIfChanged(V19, minValve);
       blynkWriteIfChanged(V20, maxValve);
       blynkWriteIfChanged(V56, runCopy.nivelMedido); // <- Publica no pino virtual V56 analogico escalonado de 0 a 100
@@ -1403,8 +1506,10 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
                  (unsigned long)runCopy.counterRST);
 
         Blynk.virtualWrite(V45, resetMsg);
-        queueLogf(manualValveCopy ? "Válvula em MANUAL" : "Válvula em AUTO");
-        ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);
+        queueLogf(manualValveCopy ? "Válvula Proporcional em Manual" : "Válvula Proporcional em Automático");
+        queueLogf(Float_Level_CNTRL_Status_ON_OFF ? "Ativado controle de Nível Min/Max" : "Desativado controle de Nível Min/Max");
+        ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);                
+
 
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
           gRun.sendResetLog = false;
@@ -1676,6 +1781,36 @@ static bool getScheduledMotorOff(const ScheduleData &schedule,
   return true;
 }
 
+void FloatLevelSensorControl(int nivelMedido, bool motorDesligado,
+                             uint8_t nivelMin, uint8_t nivelMax,
+                             PulseType &ultimoPulsoNivel)
+{
+  PulseType necessario = PULSE_NONE;
+  if (nivelMedido < nivelMin && !motorDesligado) {
+    necessario = PULSE_DESLIGA;
+  } else if (nivelMedido > nivelMax && motorDesligado) {
+    necessario = PULSE_LIGA;
+  }
+
+  if (necessario == PULSE_NONE) {
+    ultimoPulsoNivel = PULSE_NONE;
+    return;
+  }
+
+  if (necessario == ultimoPulsoNivel ||
+      gPulseCtrl.step != PULSE_IDLE || gPulseCtrl.pendingType != PULSE_NONE) {
+    return;
+  }
+
+  if (requestPulse(necessario, necessario == PULSE_DESLIGA ? "nivel minimo" : "nivel maximo", false)) {
+    gPulseCtrl.floatLevelCommand = true;
+    ultimoPulsoNivel = necessario;
+    ESP_LOGI(TAG_IO, "Controle de nivel: nivel=%d minimo=%u maximo=%u, pulso %s solicitado",
+             nivelMedido, (unsigned)nivelMin, (unsigned)nivelMax,
+             necessario == PULSE_LIGA ? "LIGAR" : "DESLIGAR");
+  }
+}
+
 void TaskIOControl(void *pv)
 {
   LOG_TASK_START(TAG_IO);
@@ -1687,6 +1822,10 @@ void TaskIOControl(void *pv)
   bool startupMotorTargetOff = true;
   bool agendaAtivaAnterior = false;
   bool agendaReconcilePending = false;
+  bool manualMotorSolicitadoLigado = !ultimoComandoMotorOff;
+  PulseType ultimoPulsoNivel = PULSE_NONE;
+  bool limitesNivelInvalidos = false;
+  bool leituraNivelValida = false;
 
   for (;;) {
     markAlive(lastAliveIO, millis());
@@ -1701,6 +1840,11 @@ void TaskIOControl(void *pv)
     bool rtcErrorCopy = false;
     bool entradaLida = false;
     bool controladorLivreNaLeitura = false;
+    bool nivelControleAtivo = false;
+    bool nivelCalibrando = false;
+    int nivelMedido = 0;
+    uint8_t nivelMin = 0;
+    uint8_t nivelMax = 0;
 
     if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
       cmd       = gCmd;
@@ -1709,6 +1853,11 @@ void TaskIOControl(void *pv)
       inputCopy = gInputs;
       mbCopy    = gModbus;
       rtcErrorCopy = gRun.rtcError;
+      nivelControleAtivo = Float_Level_CNTRL_Status_ON_OFF;
+      nivelCalibrando = gCalibrando;
+      nivelMedido = gRun.nivelMedido;
+      nivelMin = Float_Level_MIN;
+      nivelMax = Float_Level_MAX;
 
       gCmd.forcaLiga    = false;
       gCmd.forcaDesliga = false;
@@ -1768,10 +1917,12 @@ void TaskIOControl(void *pv)
         int minSensorNivel = 0;
         int maxSensorNivel = 4095;
         bool calibrandoLocal = false;
+        bool calibracaoLida = false;
 
         // 2. Acesso seguro para verificar/atualizar a calibração
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
           calibrandoLocal = gCalibrando;
+          nivelCalibrando = calibrandoLocal;
       
           if (calibrandoLocal) {
            // Alarga os limites dinamicamente se encontrar valores mais extremos
@@ -1781,8 +1932,10 @@ void TaskIOControl(void *pv)
       
           minSensorNivel = gSensorMin;
           maxSensorNivel = gSensorMax;
+          calibracaoLida = true;
           xSemaphoreGive(mtxData);
         }
+        leituraNivelValida = calibracaoLida && !calibrandoLocal && minSensorNivel < maxSensorNivel;
 
       // 3. Aplica o constrain para travar o ruído dentro dos limites estabelecidos
       int leituraTratada = constrain(nivelRaw, minSensorNivel, maxSensorNivel);
@@ -1793,6 +1946,7 @@ void TaskIOControl(void *pv)
       // 4.1 Aplica media movel de amostras e escreve no DAC (GPIO26) de forma inversa.
       // Quanto maior o nivel, menor a saida DAC, chama a função a cada 200ms.
       int nivelMediaMovel = outputValve(nivelRaw, nivelEscalonado, bloquearValvula);
+      nivelMedido = nivelMediaMovel;
 
       // 5. Salva de forma segura na estrutura global de execução
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1855,6 +2009,7 @@ void TaskIOControl(void *pv)
           }
         }
       } else {
+        leituraNivelValida = false;
         ESP_LOGW(TAG_IO, "Falha ao ler PCF8574 de entrada");
       }
     }
@@ -1894,6 +2049,52 @@ void TaskIOControl(void *pv)
     // Envia todas as alterações de bits feitas acima para o PCF8574 físico
     writeOutputPLC();
 
+    if (!inputCopy.modoLocal && sch.remotoOuAgenda == 0 && cmd.forcaDesliga) {
+      manualMotorSolicitadoLigado = false;
+    }
+
+    bool motorAutorizadoPorNivel = false;
+    if (motorInputsInitialized && !inputCopy.modoLocal) {
+      if (sch.remotoOuAgenda == 0) {
+        motorAutorizadoPorNivel = manualMotorSolicitadoLigado;
+      } else if (sch.remotoOuAgenda == 1 && !rtcErrorCopy) {
+        bool motorOffEsperado = false;
+        bool diaAtivo = false;
+        bool dentroHorario = false;
+        motorAutorizadoPorNivel =
+          getScheduledMotorOff(sch, timeCopy, motorOffEsperado, diaAtivo, dentroHorario) &&
+          !motorOffEsperado;
+      }
+    }
+
+    bool controleNivelPermitido = nivelControleAtivo && motorAutorizadoPorNivel &&
+                                  leituraNivelValida && !nivelCalibrando && nivelMin <= nivelMax;
+    if (nivelControleAtivo && nivelMin > nivelMax) {
+      if (!limitesNivelInvalidos) {
+        ESP_LOGW(TAG_IO, "Controle de nivel suspenso: minimo %u maior que maximo %u",
+                 (unsigned)nivelMin, (unsigned)nivelMax);
+        limitesNivelInvalidos = true;
+      }
+    } else {
+      limitesNivelInvalidos = false;
+    }
+    if (!controleNivelPermitido) {
+      ultimoPulsoNivel = PULSE_NONE;
+    }
+
+    // Cancela um pulso de nivel ainda em validacao se o comando deixar de ser valido.
+    if (gPulseCtrl.floatLevelCommand && gPulseCtrl.step == PULSE_VALIDATING &&
+        (!controleNivelPermitido ||
+         (gPulseCtrl.type == PULSE_LIGA && (nivelMedido <= nivelMax || !inputCopy.motorStatus)) ||
+         (gPulseCtrl.type == PULSE_DESLIGA && (nivelMedido >= nivelMin || inputCopy.motorStatus)))) {
+      ESP_LOGI(TAG_IO, "Pulso por nivel cancelado: condicoes alteradas");
+      gPulseCtrl.type = PULSE_NONE;
+      gPulseCtrl.step = PULSE_IDLE;
+      gPulseCtrl.floatLevelCommand = false;
+      ultimoPulsoNivel = PULSE_NONE;
+      tryStartPendingPulse();
+    }
+
     // Processa pulsos sem bloquear a task de I/O.
     processPulseController();
 
@@ -1917,12 +2118,15 @@ void TaskIOControl(void *pv)
     // Modo manual APP
     if (sch.remotoOuAgenda == 0) {
       if (cmd.forcaLiga) {
-        pulseLiga("APP", true);
+        if (requestPulse(PULSE_LIGA, "APP", true)) {
+          manualMotorSolicitadoLigado = true;
+        }
         cicloOFF = 0;
         ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado pelo APP");
       }
 
       if (cmd.forcaDesliga) {
+        manualMotorSolicitadoLigado = false;
         pulseDesliga("APP", true);
         cicloON = 0;
         ESP_LOGI(TAG_IO, "Pulso DESLIGAR solicitado pelo APP");
@@ -1992,6 +2196,11 @@ void TaskIOControl(void *pv)
           ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado por agendamento");
         }
       }
+    }
+
+    if (controleNivelPermitido && entradaLida) {
+      FloatLevelSensorControl(nivelMedido, inputCopy.motorStatus,
+                              nivelMin, nivelMax, ultimoPulsoNivel);
     }
 
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -2719,12 +2928,18 @@ void loadCounterAndMotorState(bool &memMotorState)
 
 void loadSettingsFromNVS()
 {
-  preferences.begin("my-app", false);
+  if (!preferences.begin("my-app", false)) {
+    ESP_LOGE(TAG_NVS, "Falha ao abrir NVS para carregar configuracoes");
+    return;
+  }
 
   uint32_t liga    = preferences.getUInt("HoraLigaPGM", 0);
   uint32_t desliga = preferences.getUInt("HoraDESLigaPGM", 0);
   int modo         = preferences.getUInt("RemotoOuAgenda", 0);
   String dias      = preferences.getString("DiaSemPGM", "NULL");
+  uint8_t floatLevelMin = preferences.getUChar("floatLvlMin", 0);
+  uint8_t floatLevelMax = preferences.getUChar("floatLvlMax", 0);
+  bool floatLevelControl = preferences.getBool("floatLvlCtrl", false);
 
   preferences.end();
 
@@ -2738,6 +2953,9 @@ void loadSettingsFromNVS()
 
     strncpy(gRun.modoText, "START", sizeof(gRun.modoText) - 1);
     gRun.modoText[sizeof(gRun.modoText) - 1] = '\0';
+    Float_Level_MIN = floatLevelMin;
+    Float_Level_MAX = floatLevelMax;
+    Float_Level_CNTRL_Status_ON_OFF = floatLevelControl;
 
     xSemaphoreGive(mtxData);
   }
@@ -2748,6 +2966,29 @@ void loadSettingsFromNVS()
            (unsigned long)desliga,
            modo,
            dias.c_str());
+  ESP_LOGI(TAG_NVS,
+           "Limites Float Level carregados: MIN=%u MAX=%u",
+           (unsigned)floatLevelMin,
+           (unsigned)floatLevelMax);
+  ESP_LOGI(TAG_NVS, "Controle de nivel carregado: %s", floatLevelControl ? "ATIVADO" : "DESATIVADO");
+}
+
+void saveFloatLevelControlToNVS(bool ativo)
+{
+  Preferences floatLevelPreferences;
+  if (!floatLevelPreferences.begin("my-app", false)) {
+    ESP_LOGE(TAG_NVS, "Falha ao abrir NVS para salvar controle de nivel");
+    return;
+  }
+
+  size_t bytesWritten = floatLevelPreferences.putBool("floatLvlCtrl", ativo);
+  floatLevelPreferences.end();
+  if (bytesWritten != sizeof(uint8_t)) {
+    ESP_LOGE(TAG_NVS, "Falha ao salvar controle de nivel na NVS");
+    return;
+  }
+
+  ESP_LOGI(TAG_NVS, "Controle de nivel salvo na NVS: %s", ativo ? "ATIVADO" : "DESATIVADO");
 }
 
 void saveScheduleToNVS()
@@ -2855,7 +3096,7 @@ void loadValveFromNVS()
   }
 
   ESP_LOGI(TAG_NVS,
-           "Valvula carregada NVS: Modo=%s min=%d center=%d max=%d",
+           "Valvula proposicional carregada NVS: Modo=%s min=%d center=%d max=%d",
            manualLocal ? "MANUAL" : "AUTO",
            minLocal,
            adjValveLocal,
