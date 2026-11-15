@@ -1438,6 +1438,8 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       ScheduleData scheduleCopy;
       bool manualValveCopy = false;
       int dacValveCopy = 0;
+      uint8_t floatLevelMinCopy = 0;
+      uint8_t floatLevelMaxCopy = 0;
 
       if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
          timeCopy      = gTime;
@@ -1454,6 +1456,8 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
         scheduleCopy = gSchedule;
         manualValveCopy = manualValve;
         dacValveCopy = VoutValve;
+        floatLevelMinCopy = Float_Level_MIN;
+        floatLevelMaxCopy = Float_Level_MAX;
         xSemaphoreGive(mtxData);
       } else {
         ESP_LOGW(TAG_BLYNK, "Timeout ao copiar dados compartilhados");
@@ -1474,6 +1478,8 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
       blynkWriteIfChanged(V43, inputCopy.motorStatus ? "MOTOR DESLIGADO" : "MOTOR LIGADO");
 
       blynkWriteIfChanged(V48, inputCopy.modoLocal ? 1 : 0);
+      blynkWriteIfChanged(V12, (int)floatLevelMinCopy);
+      blynkWriteIfChanged(V13, (int)floatLevelMaxCopy);
       blynkWriteIfChanged(V14, Float_Level_CNTRL_Status_ON_OFF ? 1 : 0);
       blynkWriteIfChanged(V19, minValve);
       blynkWriteIfChanged(V20, maxValve);
