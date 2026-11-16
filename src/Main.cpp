@@ -62,7 +62,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
   uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
   uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32 (diminuir sobe no app)
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
-  float   setCorrente         = 0.1f; // 1.2 A - Corrente média (A) abaixo da qual os relés 3 e 4 são ligados e válvula é fechada
+  float   setCorrente         = 0.02f; // 1.2 A - Corrente média (A) abaixo da qual os relés 3 e 4 são ligados e válvula é fechada
   
   #define BLYNK_HEARTBEAT 10           // timeout de queda = 28s, ping ao servidor a cada 10s
   // sem  BLYNK_HEARTBEAT definido     // timeout de queda = 58s, ping ao servidor a cada 40s
