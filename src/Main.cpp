@@ -59,7 +59,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
 
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
-  uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t tempoStart          = 60;     // para dar tempo do wi-fi iniciar no roteador externo
   uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32 (diminuir sobe no app)
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 0.02f; // 1.2 A - Corrente média (A) abaixo da qual os relés 3 e 4 são ligados e válvula é fechada
@@ -211,11 +211,9 @@ TaskHandle_t taskSupervisorHandle = NULL;
 
 // Tamanho de pilha para cada tarefa (em bytes)
 #define STACK_BLYNK        8192
-#define STACK_IO_CONTROL   3072
-#define STACK_RTC          4096 //2048 - CRASH RESET - 
-//Guru Meditation Error: Core  0 panic'ed (Unhandled debug exception). 
-//Debug exception reason: Stack canary watchpoint triggered (TaskRTC) 
-#define STACK_DISPLAY      3584
+#define STACK_IO_CONTROL   4096
+#define STACK_RTC          4096                    //2048 - CRASH RESET - Guru Meditation Error: Core  0 panic'ed (Unhandled debug exception)
+#define STACK_DISPLAY      4096
 #define STACK_MODBUS       4096
 #define STACK_SUPERVISOR   3072
 
@@ -1218,10 +1216,12 @@ void loop()
   // Tarefa que mostra um diagnóstico de saude do ESP32 a cada 70 segundos, mas está comentada para não poluir o log
   /*
   static uint32_t temporizadorDiagnostico = 0;
-  if (millis() - temporizadorDiagnostico > 70000) { temporizadorDiagnostico = millis(); imprimirDiagnosticoSistema(); }
-  vTaskDelay(pdMS_TO_TICKS(1)); 
+  if (millis() - temporizadorDiagnostico > 70000) {
+         temporizadorDiagnostico = millis();
+         imprimirDiagnosticoSistema();
+         }
+  vTaskDelay(pdMS_TO_TICKS(100)); 
   */
-  
   vTaskDelay(portMAX_DELAY); //coloca a tarefa do loop() em estado de bloqueio permanente 
 }
 
@@ -1396,8 +1396,9 @@ void TaskBlynk(void *pv)
             }
         }
 
-// Envia logs da fila para o Blynk adicionando Data e Hora
-while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
+// Envia logs da fila para o Blynk adicionando Data e Hora (máximo 10 por ciclo para evitar stack overflow)
+int logsProcessados = 0;
+while ((xQueueReceive(qLog, &logMsg, 0) == pdTRUE) && (logsProcessados < 10)) {
     char logComTimestamp[150]; // Buffer para armazenar o log final com o tempo
     SystemTimeData timeCopy;
     bool rtcValido = false;
@@ -1424,8 +1425,12 @@ while (xQueueReceive(qLog, &logMsg, 0) == pdTRUE) {
     // 3. Concatena o texto original do log que veio da fila
     strncat(logComTimestamp, logMsg.text, sizeof(logComTimestamp) - strlen(logComTimestamp) - 1);
     
-    // 4. Envia para o pino virtual do Terminal/Log no Blynk
-    Blynk.virtualWrite(V45, logComTimestamp);
+    // 4. Envia para o pino virtual do Terminal/Log no Blynk (apenas se conectado)
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(V45, logComTimestamp);
+    }
+    
+    logsProcessados++;
 }
 
     // Envio rápido a cada 1000 milisegundos
