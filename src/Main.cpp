@@ -124,6 +124,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
 #include "esp_log.h"
 #include "driver/rmt.h"
 #include <stdarg.h>
+#include <string.h>
 
 // =====================================================
 // TAGs esp_log
@@ -140,8 +141,13 @@ static const char *TAG_NVS        = "NVS";
 static const char *TAG_I2C        = "I2C";
 static const char *TAG_SUPERVISOR = "SUPERVISOR";
 
+// ajusta a formatação do log de início de task para alinhar as colunas pelo | no log
+// O cálculo do espaçamento leva em consideração o tamanho da string "Task iniciada", o nome da task e o TAG utilizado.
 #define LOG_TASK_START(TAG) \
-  ESP_LOGI(TAG, "Task iniciada | core=%d | task=%s", xPortGetCoreID(), pcTaskGetName(NULL))
+  ESP_LOGI(TAG, "%-*s | core=%d |   task=%s", \
+           (int)(sizeof("Task iniciada") - 1 + sizeof("TaskSupervisor") - 1 + \
+                 sizeof("SUPERVISOR") - 1) - (int)strlen(__FUNCTION__) - (int)strlen(TAG), \
+           "Task iniciada", xPortGetCoreID(), pcTaskGetName(NULL))
 
 #define LOG_HEAP(TAG) \
   ESP_LOGI(TAG, "Memória RAM livre: %lu bytes", (unsigned long)ESP.getFreeHeap()) // Heap livre no ESP32 é a quantidade de memória RAM disponível e dinâmica. 
@@ -833,7 +839,7 @@ void imprimirDiagnosticoSistema() {
 
     // 2. Cabecalho Principal
     Serial.println(F("\n===================================================="));
-    Serial.println(F("           DIAGNOSTICO DE SAUDE DO ESP32           "));
+    Serial.println(F("            DIAGNOSTICO DE SAUDE DA CPU             "));
     Serial.println(F("===================================================="));
 
     // 3. Informacoes do Hardware
@@ -1517,9 +1523,11 @@ while ((xQueueReceive(qLog, &logMsg, 0) == pdTRUE) && (logsProcessados < 10)) {
                  (unsigned long)runCopy.counterRST);
 
         Blynk.virtualWrite(V45, resetMsg);
+        queueLogf("MOTOR STATUS: %s", inputCopy.motorStatus ? "DESLIGADO" : "LIGADO");
         queueLogf(manualValveCopy ? "Válvula Proporcional em Manual" : "Válvula Proporcional em Automático");
         queueLogf(Float_Level_CNTRL_Status_ON_OFF ? "Ativado controle de Nível Min/Max" : "Desativado controle de Nível Min/Max");
-        ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);                
+        ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);
+        imprimirDiagnosticoSistema();     // depois de enviar o log pós reset, imprime o diagnóstico do sistema
 
 
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1891,8 +1899,10 @@ void TaskIOControl(void *pv)
 
       uint8_t inputPCF = 0xFF;
       bool readOk = false;
-
-      if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+      bool i2cLockAcquired = false;
+      // era 100ms, aumentei para 200ms para dar mais tempo na leitura I2C do PCF
+      if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(200)) == pdTRUE) {
+        i2cLockAcquired = true;
         Wire.requestFrom(PCF_INPUT_ADDR, 1);
 
         if (Wire.available()) {
@@ -1902,7 +1912,10 @@ void TaskIOControl(void *pv)
 
         xSemaphoreGive(mtxI2C);
       } else {
-        ESP_LOGW(TAG_IO, "Timeout ao acessar I2C para leitura PCF entrada");
+        TaskHandle_t mutexOwner = xSemaphoreGetMutexHolder(mtxI2C);
+        const char *ownerName = mutexOwner ? pcTaskGetName(mutexOwner) : "desconhecido";
+        ESP_LOGW(TAG_IO, "Timeout ao acessar I2C para leitura PCF entrada; mutex em uso por: %s",
+                 ownerName);
       }
 
       if (readOk) {
@@ -2021,7 +2034,9 @@ void TaskIOControl(void *pv)
         }
       } else {
         leituraNivelValida = false;
-        ESP_LOGW(TAG_IO, "Falha ao ler PCF8574 de entrada");
+        if (i2cLockAcquired) {
+          ESP_LOGW(TAG_IO, "Falha ao ler PCF8574 de entrada");
+        }
       }
     }
 
@@ -2222,6 +2237,59 @@ void TaskIOControl(void *pv)
 // Task Display - Core 0
 // =====================================================
 
+static bool sendDisplayBufferInChunks()
+{
+  uint8_t *buffer = display.getBuffer();
+  if (!buffer) {
+    ESP_LOGE(TAG_DISPLAY, "Buffer do display indisponivel");
+    return false;
+  }
+
+  static const uint8_t pageCount = 8;
+  static const uint8_t chunkSize = 24;
+
+  for (uint8_t page = 0; page < pageCount; page++) {
+    for (uint8_t column = 0; column < 128; column += chunkSize) {
+      uint8_t bytesToSend = min((int)chunkSize, 128 - (int)column);
+      if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG_DISPLAY, "Timeout ao obter mutex I2C para atualizar display");
+        return false;
+      }
+
+      Wire.beginTransmission(OLED_ADDR);
+      Wire.write((uint8_t)0x00);
+      Wire.write((uint8_t)0x22);
+      Wire.write(page);
+      Wire.write(page);
+      Wire.write((uint8_t)0x21);
+      Wire.write(column);
+      Wire.write(column + bytesToSend - 1);
+      int err = Wire.endTransmission();
+
+      if (err == 0) {
+        Wire.beginTransmission(OLED_ADDR);
+        Wire.write((uint8_t)0x40);
+        size_t bytesWritten = Wire.write(&buffer[page * 128 + column], bytesToSend);
+        err = Wire.endTransmission();
+        if (bytesWritten != bytesToSend && err == 0) {
+          err = -1;
+        }
+      }
+
+      xSemaphoreGive(mtxI2C);
+
+      if (err != 0) {
+        ESP_LOGW(TAG_DISPLAY, "Falha ao atualizar bloco do display. Erro=%d", err);
+        return false;
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+  }
+
+  return true;
+}
+
 void TaskDisplay(void *pv)
 {
   LOG_TASK_START(TAG_DISPLAY);
@@ -2255,103 +2323,95 @@ void TaskDisplay(void *pv)
 
     // Condição: Atualiza se o segundo mudou OU se já passou 500ms desde o último pulso do coração
     if (segundoMudou || meioSegundoPassou) {
+      display.clearDisplay();
+      display.setTextColor(SSD1306_WHITE);
 
-      if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
-        display.clearDisplay();
-        display.setTextColor(SSD1306_WHITE);
+      // Hora
+      display.setTextSize(2);
+      display.setCursor(15, 0);
 
-        // Hora
-        display.setTextSize(2);
-        display.setCursor(15, 0);
+      if (t.hour < 10) display.print(' ');
+      display.print(t.hour);
+      display.print(":");
 
-        if (t.hour < 10) display.print(' ');
-        display.print(t.hour);
-        display.print(":");
+      if (t.min < 10) display.print('0');
+      display.print(t.min);
+      // Descomente abaixo se quiser exibir os segundos na tela também:
+      display.print(":");
+      if (t.sec < 10) display.print('0');
+      display.print(t.sec);
 
-        if (t.min < 10) display.print('0');
-        display.print(t.min);
-        // Descomente abaixo se quiser exibir os segundos na tela também:
-        display.print(":");
-        if (t.sec < 10) display.print('0');
-        display.print(t.sec);
+      // Se a atualização foi motivada pelo tempo (500ms), invertemos o coração
+      if (meioSegundoPassou) {
+        heartBeat = !heartBeat; // Inverte o estado do heartBeat
+        ultimoHeartbeatMs = millis();             // Reseta o cronômetro do heartbeat
+      }
 
-        // Se a atualização foi motivada pelo tempo (500ms), invertemos o coração
-        if (meioSegundoPassou) {
-          heartBeat = !heartBeat; // Inverte o estado do heartBeat
-          ultimoHeartbeatMs = millis();             // Reseta o cronômetro do heartbeat
-        }
-
-        // imprime o coração apenas se o segundo mudou, para não sobrecarregar o display
-        /*
-        if (heartBeat) {
-          // Batida alta: Desenha o coração cheio na posição original
-          display.setCursor(96, 3);
-          display.write(3); 
-        } else {
-          // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor 
-          display.setCursor(96, 3);
-          display.print(" "); 
-        }
-        */
-
-        // Temperatura
-        display.setCursor(0, 50);
-        display.cp437(true);
-        display.print(r.temp);
-        display.write(0xF8);
-
-        // Modo
-        display.setCursor(55, 28);
-        display.print(r.modoText);
-
-        // RSSI e estado Blynk
-        display.setTextSize(1);
-        display.setCursor(44, 57);
-        display.print(r.rssi);
+      // imprime o coração apenas se o segundo mudou, para não sobrecarregar o display
+      /*
+      if (heartBeat) {
+        // Batida alta: Desenha o coração cheio na posição original
+        display.setCursor(96, 3);
+        display.write(3);
+      } else {
+        // Batida baixa: Você pode deixar vazio ou desenhar um caractere menor
+        display.setCursor(96, 3);
         display.print(" ");
-        display.print(r.blynkStateText);
+      }
+      */
 
-        // Símbolo Wi-Fi clássico: arcos abertos embaixo e ponto central.
-        const int arcRadii[] = {7, 12, 17};
-        const int arcCount = r.rssi >= -55 ? 3
-                           : r.rssi >= -70 ? 2
-                           : r.rssi >= -82 ? 1
-                           : 0;
-        const int centerX = 29;
-        const int centerY = 40;
-        const bool belowMinimum = !r.wifiConnected || r.rssi >= 0 || r.rssi < -82;
-        display.fillCircle(centerX, centerY, 1, WHITE);
-        for (int i = 0; i < (belowMinimum ? 3 : arcCount); i++) {
-          for (int stroke = 0; stroke < 2; stroke++) {
-            const int radius = arcRadii[i] - stroke;
-            int previousX = centerX + (int)roundf(radius * cosf(36.0f * 0.0174533f));
-            int previousY = centerY - (int)roundf(radius * sinf(36.0f * 0.0174533f));
-            for (int degrees = 39; degrees <= 144; degrees += 3) {
-              const float angle = degrees * 0.0174533f;
-              const int x = centerX + (int)roundf(radius * cosf(angle));
-              const int y = centerY - (int)roundf(radius * sinf(angle));
-              display.drawLine(previousX, previousY, x, y, WHITE);
-              previousX = x;
-              previousY = y;
-            }
+      // Temperatura
+      display.setCursor(0, 50);
+      display.cp437(true);
+      display.print(r.temp);
+      display.write(0xF8);
+
+      // Modo
+      display.setCursor(55, 28);
+      display.print(r.modoText);
+
+      // RSSI e estado Blynk
+      display.setTextSize(1);
+      display.setCursor(44, 57);
+      display.print(r.rssi);
+      display.print(" ");
+      display.print(r.blynkStateText);
+
+      // Símbolo Wi-Fi clássico: arcos abertos embaixo e ponto central.
+      const int arcRadii[] = {7, 12, 17};
+      const int arcCount = r.rssi >= -55 ? 3
+                         : r.rssi >= -70 ? 2
+                         : r.rssi >= -82 ? 1
+                         : 0;
+      const int centerX = 29;
+      const int centerY = 40;
+      const bool belowMinimum = !r.wifiConnected || r.rssi >= 0 || r.rssi < -82;
+      display.fillCircle(centerX, centerY, 1, WHITE);
+      for (int i = 0; i < (belowMinimum ? 3 : arcCount); i++) {
+        for (int stroke = 0; stroke < 2; stroke++) {
+          const int radius = arcRadii[i] - stroke;
+          int previousX = centerX + (int)roundf(radius * cosf(36.0f * 0.0174533f));
+          int previousY = centerY - (int)roundf(radius * sinf(36.0f * 0.0174533f));
+          for (int degrees = 39; degrees <= 144; degrees += 3) {
+            const float angle = degrees * 0.0174533f;
+            const int x = centerX + (int)roundf(radius * cosf(angle));
+            const int y = centerY - (int)roundf(radius * sinf(angle));
+            display.drawLine(previousX, previousY, x, y, WHITE);
+            previousX = x;
+            previousY = y;
           }
         }
-        if (belowMinimum) {
-          display.setTextColor(WHITE, BLACK);
-          display.setCursor(centerX + arcRadii[2] - 5, centerY - arcRadii[2]);
-          display.write("X"); // display.print(' X');
-          display.setTextColor(WHITE);
-        }
+      }
+      if (belowMinimum) {
+        display.setTextColor(WHITE, BLACK);
+        display.setCursor(centerX + arcRadii[2] - 5, centerY - arcRadii[2]);
+        display.write("X"); // display.print(' X');
+        display.setTextColor(WHITE);
+      }
 
-        display.display();
-
-        xSemaphoreGive(mtxI2C);
-
-        // Salva o segundo atual para a próxima comparação
-        ultimoSegundo = t.sec; 
-
-      } else {
-        ESP_LOGW(TAG_DISPLAY, "Timeout ao acessar I2C para display");
+      // A montagem do quadro altera apenas o buffer RAM; o mutex protege a transmissao I2C.
+      if (sendDisplayBufferInChunks()) {
+        ultimoSegundo = t.sec;
       }
     }
 
@@ -2376,7 +2436,8 @@ void TaskModbus(void *pv) {
   // Inicializa o cliente eModbus
   mbClient.begin(Serial1);
 
-  ESP_LOGI(TAG_MODBUS, "RS-485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
+  // linha abaixo comentada para evitar log desnecessário durante a inicialização
+  //ESP_LOGI(TAG_MODBUS, "RS-485 iniciado em Serial1 RX=14 TX=27 baud=9600 slave=1");
 
   static bool lastModbusError = false;  // Rastreia o estado anterior do erro
 
@@ -2583,7 +2644,8 @@ void TaskSupervisor(void *pv) {
 
 bool writeOutputPLC()
 {
-  if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(100)) == pdTRUE) {
+  // era 100ms, aumentei para 200ms para dar mais tempo na leitura I2C do PCF
+  if (xSemaphoreTake(mtxI2C, pdMS_TO_TICKS(200)) == pdTRUE) {
     Wire.beginTransmission(PCF_OUTPUT_ADDR);
     Wire.write(output_PLC);
     int err = Wire.endTransmission();
@@ -2598,7 +2660,10 @@ bool writeOutputPLC()
       return true;
     }
   } else {
-    ESP_LOGW(TAG_IO, "Timeout ao acessar I2C para escrita PCF saida");
+    TaskHandle_t mutexOwner = xSemaphoreGetMutexHolder(mtxI2C);
+    const char *ownerName = mutexOwner ? pcTaskGetName(mutexOwner) : "desconhecido";
+    ESP_LOGW(TAG_IO, "Timeout ao acessar I2C para escrita PCF saida; mutex em uso por: %s",
+             ownerName);
     return false;
   }
 }
