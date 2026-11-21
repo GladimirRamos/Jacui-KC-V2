@@ -59,7 +59,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
 
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
-  uint8_t tempoStart          = 60;     // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
   uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32 (diminuir sobe no app)
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 0.02f; // 1.2 A - Corrente média (A) abaixo da qual os relés 3 e 4 são ligados e válvula é fechada
@@ -2005,12 +2005,24 @@ void TaskIOControl(void *pv)
           } else if (sch.remotoOuAgenda == 0) {
             startupMotorTargetOff = ultimoComandoMotorOff;
             if (in.motorStatus != startupMotorTargetOff) {
-              if (startupMotorTargetOff) {
-                pulseDesliga("memoria manual");
-              } else {
-                pulseLiga("memoria manual");
+              // Verificação de nível antes de enviar pulso LIGAR
+              bool bloqueadoPorNivel = false;
+              if (!startupMotorTargetOff && nivelControleAtivo && nivelMedido < nivelMin) {
+                // Pulso seria LIGAR, nível ativado, e nível abaixo do mínimo
+                bloqueadoPorNivel = true;
+                ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado: nível do rio (%.0d) abaixo do mínimo (%.0u)",
+                         nivelMedido, (unsigned)nivelMin);
+                queueLogf("Aguardando o nível do rio subir...");
               }
-              startupMotorAwaitingFeedback = true;
+
+              if (!bloqueadoPorNivel) {
+                if (startupMotorTargetOff) {
+                  pulseDesliga("memoria manual");
+                } else {
+                  pulseLiga("memoria manual");
+                }
+                startupMotorAwaitingFeedback = true;
+              }
             }
             startupMotorReconcilePending = false;
             ESP_LOGI(TAG_IO,
@@ -2191,11 +2203,23 @@ void TaskIOControl(void *pv)
 
       if (agendaReconcilePending) {
         if (inputCopy.motorStatus != motorOffEsperado) {
-          PulseType comando = motorOffEsperado ? PULSE_DESLIGA : PULSE_LIGA;
-          if (!requestPulse(comando, "entrada agenda", false)) {
-            ESP_LOGW(TAG_IO, "Nao foi possivel solicitar pulso ao entrar em AGENDA");
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
+          // Verificação de nível antes de enviar pulso LIGAR
+          bool bloqueadoPorNivel = false;
+          if (!motorOffEsperado && nivelControleAtivo && nivelMedido < nivelMin) {
+            // Pulso seria LIGAR, nível ativado, e nível abaixo do mínimo
+            bloqueadoPorNivel = true;
+            ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda): nível do rio (%.0d) abaixo do mínimo (%.0u)",
+                     nivelMedido, (unsigned)nivelMin);
+            queueLogf("Aguardando o nível do rio subir...");
+          }
+
+          if (!bloqueadoPorNivel) {
+            PulseType comando = motorOffEsperado ? PULSE_DESLIGA : PULSE_LIGA;
+            if (!requestPulse(comando, "entrada agenda", false)) {
+              ESP_LOGW(TAG_IO, "Nao foi possivel solicitar pulso ao entrar em AGENDA");
+              vTaskDelay(pdMS_TO_TICKS(50));
+              continue;
+            }
           }
         }
 
@@ -2217,9 +2241,18 @@ void TaskIOControl(void *pv)
       } else {
         // Fora do horário: LIGA
         for (; cicloON < 1; cicloON++) {
-          pulseLiga("agendamento");
-          cicloOFF = 0;
-          ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado por agendamento");
+          // Verificação de nível antes de enviar pulso LIGAR
+          if (nivelControleAtivo && nivelMedido < nivelMin) {
+            ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda ciclo): nível do rio (%.0d) abaixo do mínimo (%.0u)",
+                     nivelMedido, (unsigned)nivelMin);
+            queueLogf("Aguardando o nível do rio subir...");
+            // Não avança cicloON para manter tentando quando nível subir
+            break;
+          } else {
+            pulseLiga("agendamento");
+            cicloOFF = 0;
+            ESP_LOGI(TAG_IO, "Pulso LIGAR solicitado por agendamento");
+          }
         }
       }
     }

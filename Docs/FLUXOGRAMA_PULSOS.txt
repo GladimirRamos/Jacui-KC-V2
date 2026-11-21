@@ -1,0 +1,427 @@
+╔═══════════════════════════════════════════════════════════════════════════════════════════════╗
+║                 FLUXOGRAMA COMPLETO DE ACIONAMENTO DOS PULSOS DO MOTOR                        ║
+║                     (Após Reinicialização do Sistema)                                         ║
+╚═══════════════════════════════════════════════════════════════════════════════════════════════╝
+
+
+FASE 1: INICIALIZAÇÃO DO SISTEMA (setup() - ~5-10 segundos)
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+                              ┌──────────────────────┐
+                              │   ESP32 Reinicia     │
+                              └──────────┬───────────┘
+                                        │
+                                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Inicializar Hardware Base            │
+                    │  - Serial (115200 baud)               │
+                    │  - FreeRTOS (Mutex, Fila)             │
+                    │  - I2C, Display OLED                  │
+                    └───────────────────┬───────────────────┘
+                                        │
+                                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Testar PCF8574 (Entrada)             │
+                    │  Wire.beginTransmission(0x20)         │
+                    │  Wire.endTransmission()               │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴───────────────┐
+                        │                           │
+                      ✓ OK                        ✗ ERRO
+                        │                           │
+                        │                           ▼
+                        │              ┌──────────────────────────┐
+                        │              │  failMSG("FALHA INPUT")  │
+                        │              │  Travar no loop          │
+                        │              └──────────────────────────┘
+                        │
+                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Testar PCF8574 (Saída)               │
+                    │  Wire.beginTransmission(0x24)         │
+                    │  Wire.endTransmission()               │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴───────────┐
+                        │                       │
+                      ✓ OK                    ✗ ERRO
+                        │                       │
+                        │                       ▼
+                        │          ┌──────────────────────────┐
+                        │          │  failMSG("FALHA OUTPUT") │
+                        │          │  Travar no loop          │
+                        │          └──────────────────────────┘
+                        │
+                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Carregar Estado da NVS               │
+                    │  - ultimoComandoMotorOff              │
+                    │  - gSchedule.remotoOuAgenda           │
+                    │  - gSensorMin, gSensorMax             │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Inicializar RTC DS1307               │
+                    │  Sincronizar NTP                      │
+                    │  Inicializar Hardware Watchdog        │
+                    │  Enviar 3 pulsos de boot handshake    │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Criar Tarefas FreeRTOS:              │
+                    │  Core 0: TaskIO, TaskDisplay, ...     │
+                    │  Core 1: TaskBlynk                    │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                            ┌───────────────┐
+                            │ Setup Completo│
+                            └───────────────┘
+                                    │
+                                    ▼
+
+
+FASE 2: DETECÇÃO DO ESTADO MOTOR (TaskIOControl - 1ª leitura)
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+                    ┌───────────────────────────────────────┐
+                    │  TaskIOControl Iniciada (Core 0)      │
+                    │  motorInputsInitialized = false       │
+                    │  startupMotorReconcilePending = true  │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Aguardar 1ª leitura do PCF (200ms)   │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Obter mutex I2C (timeout 200ms)      │
+                    │  Wire.requestFrom(0x20, 1)            │
+                    │  uint8_t inputPCF = Wire.read()       │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴──────────────┐
+                        │                          │
+                      ✓ OK                       ✗ TIMEOUT
+                        │                          │
+                        │                          ▼
+                        │          ┌────────────────────────────────┐
+                        │          │  Avisar: "Timeout ao acessar   │
+                        │          │  I2C para leitura PCF entrada" │
+                        │          │  mutex em uso por: [task]      │
+                        │          └────────────────────────────────┘
+                        │          → Continuar sem leitura
+                        │
+                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Decodificar Bits do PCF:             │
+                    │  motorStatus  = inputPCF & (1 << 0)   │
+                    │  modoLocal    = inputPCF & (1 << 1)   │
+                    │  (true=DESLIGADO, false=LIGADO)       │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  motorInputsInitialized = true        │
+                    │  Atualizar gInputs (protegido)        │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+
+
+FASE 3: VERIFICAÇÃO DE RECONCILIAÇÃO
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+                    ┌───────────────────────────────────────┐
+                    │  if startupMotorReconcilePending      │
+                    │  gInputs.modoLocal == ?               │
+                    └───────────────┬───────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────────────────┐
+                    │                                           │
+                YES │                                      NO   │
+                    │                                           │
+                    ▼                                           ▼
+        ┌──────────────────────────┐         ┌────────────────────────────┐
+        │  MODO LOCAL DETECTADO    │         │  Verificar modo na NVS     │
+        │  Ignorar restauração     │         │  gSchedule.remotoOuAgenda. │
+        │  remota. Motor controlado│         └──────────────┬─────────────┘
+        │  pelo painel físico.     │                        │
+        │  startupMotorReconcile   │         ┌──────────────┴──────────┐
+        │  Pending = false         │         │                         │
+        └──────────────────────────┘    0 (MANUAL)              1 (AGENDA)
+                                             │                      │
+                                             ▼                      ▼
+                        ┌──────────────────────────────────┐
+                        │  MODO MANUAL APP                 │
+                        │  Carregar ultimoComandoMotorOff. │
+                        │  de NVS                          │
+                        └────────────────┬─────────────────┘
+                                         │
+                                         ▼
+                        ┌────────────────────────────────┐
+                        │  Comparar com estado físico:   │
+                        │  ultimoComandoMotorOff         │
+                        │  vs                            │
+                        │  gInputs.motorStatus           │
+                        └────────────────┬───────────────┘
+                                         │
+                             ┌───────────┴───────────┐
+                             │                       │
+                       IGUAL │                  DIVERGENTE
+                             │                       │
+                             ▼                       ▼
+                        ┌─────────────┐    ┌──────────────────────────┐
+                        │  Nenhum     │    │  Qual deve ser o estado? │
+                        │  pulso      │    └────────┬─────────────────┘
+                        │  enviado    │             │
+                        └─────────────┘      ┌──────┴──────┐
+                                             │             │
+                                        DESLIGAR       LIGAR
+                                             │             │
+                                             ▼             ▼
+                                        ┌────────────┐ ┌──────────────┐
+                                        │pulseLiga() │ │pulseDesliga()│
+                                        │"memoria    │ │"memoria      │
+                                        │manual"     │ │manual"       │
+                                        └────────────┘ └──────────────┘
+                                             │             │
+                                             └──────┬──────┘
+                                                    │
+                                                    ▼
+                                        ┌──────────────────────────┐
+                                        │startupMotorAwaitingFeed  │
+                                        │back = true               │
+                                        └──────────────────────────┘
+
+
+FASE 4: PROCESSAMENTO DO PULSO - MÁQUINA DE ESTADOS
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+                    ┌───────────────────────────────────────┐
+                    │  requestPulse() / startPulseNow()     │
+                    │  gPulseCtrl.step = PULSE_VALIDATING   │
+                    │  gPulseCtrl.startedAt = now           │
+                    │  gPulseCtrl.type = LIGA ou DESLIGA    │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+
+
+ESTADO: PULSE_VALIDATING (TIMEOUT: 2500ms)
+─────────────────────────────────────────────────────────────────────────────────────────────────
+
+                    ┌───────────────────────────────────────┐
+                    │  INÍCIO DE VALIDAÇÃO                  │
+                    │  gPulseCtrl.step = PULSE_VALIDATING   │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Verificação 1: Timeout de 2000ms     │
+                    │  if (now - startedAt) >= 2000ms       │
+                    │    Seguir para Verificação 2          │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Verificação 2: Barramento I2C        │
+                    │  xSemaphoreTake(mtxI2C, 20ms)         │
+                    │  Wire.requestFrom(0x68, 1)            │
+                    │  bytesRecebidos > 0 ?                 │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴────────────┐
+                        │                        │
+                    ✓ SIM                   ✗ NÃO
+                        │                       │
+                        │                       ▼
+                        │          ┌──────────────────────────┐
+                        │          │  ERRO CRÍTICO!           │
+                        │          │  "BARRAMENTO TRAVADO"    │
+                        │          │  Pulso ABORTADO          │
+                        │          │  gPulseCtrl.step = IDLE  │
+                        │          │  tryStartPendingPulse()  │
+                        │          └──────────────────────────┘
+                        │
+                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Aguardar mais 2000ms (total 4s)      │
+                    │  if (now - startedAt) >= 2000ms       │
+                    │    Prosseguir para Verificação 3      │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Verificação 3: Validar Modo (se APP) │
+                    │  if gPulseCtrl.appCommand == true     │
+                    │    xSemaphoreTake(mtxData, 50ms)      │
+                    │    Verificar:                         │
+                    │    - gInputs.modoLocal == false       │
+                    │    - gSchedule.remotoOuAgenda == 0    │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴────────────┐
+                        │                        │
+                    ✓ VÁLIDO                 ✗ INVÁLIDO
+                        │                       │
+                        │                       ▼
+                        │          ┌──────────────────────────┐
+                        │          │  Pulso APP em modo       │
+                        │          │  LOCAL ou AGENDA!        │
+                        │          │  NÃO será salvo em NVS   │
+                        │          │  Pulso é cancelado       │
+                        │          │  gPulseCtrl.step = IDLE  │
+                        │          └──────────────────────────┘
+                        │
+                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Verificação 4: Enviar Pulso ao PCF   │
+                    │  pulseBit = (type==LIGA) ? 0 : 1      │
+                    │  output_PLC &= ~(1 << pulseBit)       │
+                    │  writeOutputPLC()                     │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴────────────┐
+                        │                        │
+                    ✓ SUCESSO                ✗ FALHA
+                        │                       │
+                        │                       ▼
+                        │          ┌──────────────────────────┐
+                        │          │  "Falha ao enviar pulso" │
+                        │          │  Restaurar bit           │
+                        │          │  output_PLC |= ...       │
+                        │          │  writeOutputPLC()        │
+                        │          │  gPulseCtrl.step = IDLE  │
+                        │          └──────────────────────────┘
+                        │
+                        ▼
+                    ┌───────────────────────────────────────┐
+                    │  Verificação 5: Salvar em NVS (APP)   │
+                    │  if gPulseCtrl.appCommand == true     │
+                    │    preferences.begin("my-app")        │
+                    │    motorOff = (type == DESLIGA)       │
+                    │    putBool("MemMotorState", motorOff) │
+                    │    preferences.end()                  │
+                    │    ultimoComandoMotorOff = motorOff   │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Transição para PULSE_ACTIVE          │
+                    │  gPulseCtrl.step = PULSE_ACTIVE       │
+                    │  gPulseCtrl.pulseAt = now             │
+                    │  LOG: "Pulso enviado com sucesso"     │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+
+
+ESTADO: PULSE_ACTIVE (DURAÇÃO: 1000ms)
+─────────────────────────────────────────────────────────────────────────────────────────────────
+
+                    ┌───────────────────────────────────────┐
+                    │  PULSO ATIVO                          │
+                    │  Bit = 0 (LIGADO no PCF8574)          │
+                    │  Circuito externo decodifica          │
+                    │  Relé de acionamento energizado       │
+                    └───────────────┬───────────────────────┘
+                                    │
+                    ┌───────────────┴────────────┐
+                    │                            │
+              Aguardar 1000ms                    │
+                    │                            │
+                    ▼                            ▼
+                    ┌────────────────────────────────────┐
+                    │  if (now - pulseAt) >= 1000ms      │
+                    │    Finalizar pulso                 │
+                    └────────────┬─────────────────────┘
+                                 │
+                                 ▼
+                    ┌───────────────────────────────────┐
+                    │  Retirar Pulso                    │
+                    │  pulseBit = (type==LIGA) ? 0 : 1  │
+                    │  output_PLC |= (1 << pulseBit)    │
+                    │  writeOutputPLC()                 │
+                    └────────────┬──────────────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────────────────┐
+                    │  Registrar Sucesso no Log           │
+                    │  "Pulso LIGAR/DESLIGAR por [razão]" │
+                    │  Atualizar estrutura global         │
+                    └────────────┬────────────────────────┘
+                                 │
+                                 ▼
+                    ┌───────────────────────────────────┐
+                    │  Voltar para IDLE                 │
+                    │  gPulseCtrl.step = PULSE_IDLE     │
+                    │  gPulseCtrl.type = PULSE_NONE     │
+                    └────────────┬──────────────────────┘
+                                 │
+                                 ▼
+                    ┌───────────────────────────────────┐
+                    │  Executar Pulso Pendente          │
+                    │  if (pendingType != PULSE_NONE)   │
+                    │    tryStartPendingPulse()         │
+                    │    Volta ao PULSE_VALIDATING      │
+                    └───────────────────────────────────┘
+
+
+FASE 5: CONFIRMAÇÃO DE FEEDBACK
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+                    ┌───────────────────────────────────────┐
+                    │  if startupMotorAwaitingFeedback      │
+                    │  Monitorar próximas leituras do PCF   │
+                    └───────────────┬───────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  Comparar estado físico com esperado  │
+                    │  gInputs.motorStatus == startupMotor  │
+                    │  TargetOff ?                          │
+                    └───────────────┬───────────────────────┘
+                                    │
+                        ┌───────────┴───────────┐
+                        │                       │
+                    ✓ IGUAL                 ✗ DIFERENTE
+                        │                       │
+                        ▼                       ▼
+                    ┌──────────────┐    ┌─────────────────────┐
+                    │ Confirmação! │    │ Continuar           │
+                    │startupMotor  │    │ aguardando feedback │
+                    │AwaitingFeed  │    │ (próximo ciclo)     │
+                    │back = false  │    └─────────────────────┘
+                    │LOG: "Estado  │
+                    │confirmado"   │
+                    └──────────────┘
+                                    
+                                    ▼
+                    ┌───────────────────────────────────────┐
+                    │  INICIALIZAÇÃO COMPLETA!              │
+                    │  Sistema pronto para operação normal  │
+                    └───────────────────────────────────────┘
+
+
+═════════════════════════════════════════════════════════════════════════════════════════════════
+OPERAÇÃO NORMAL (Após Inicialização)
+═════════════════════════════════════════════════════════════════════════════════════════════════
+
+                    TaskIOControl → loop() a cada 50ms:
+
+                    1. Ler sensor de nível
+                    2. Atualizar display
+                    3. Verificar controle de nível (se ativo)
+                    4. Verificar comandos do APP
+                    5. Verificar agendamento (se em AGENDA)
+                    6. Processar pulsos (máquina de estados)
+                    7. Atualizar relés baseado em corrente
+                    8. Próximo ciclo
+
+═════════════════════════════════════════════════════════════════════════════════════════════════
