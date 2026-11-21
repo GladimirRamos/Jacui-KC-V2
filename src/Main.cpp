@@ -307,6 +307,7 @@ ModbusData     gModbus;
 RuntimeData    gRun;
 
 bool ultimoComandoMotorOff = true;
+bool bloqueadoPorNivelLastReconcile = false;
 
 int cicloON  = 0;
 int cicloOFF = 0;
@@ -1526,6 +1527,10 @@ while ((xQueueReceive(qLog, &logMsg, 0) == pdTRUE) && (logsProcessados < 10)) {
         queueLogf("MOTOR STATUS: %s", inputCopy.motorStatus ? "DESLIGADO" : "LIGADO");
         queueLogf(manualValveCopy ? "Válvula Proporcional em Manual" : "Válvula Proporcional em Automático");
         queueLogf(Float_Level_CNTRL_Status_ON_OFF ? "Ativado controle de Nível Min/Max" : "Desativado controle de Nível Min/Max");
+        if (bloqueadoPorNivelLastReconcile) {
+          queueLogf("Aguardando o nível do rio subir...");
+          bloqueadoPorNivelLastReconcile = false;
+        }
         ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);
         imprimirDiagnosticoSistema();     // depois de enviar o log pós reset, imprime o diagnóstico do sistema
 
@@ -2010,6 +2015,7 @@ void TaskIOControl(void *pv)
               if (!startupMotorTargetOff && nivelControleAtivo && nivelMedido < nivelMin) {
                 // Pulso seria LIGAR, nível ativado, e nível abaixo do mínimo
                 bloqueadoPorNivel = true;
+                bloqueadoPorNivelLastReconcile = true;
                 ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado: nível do rio (%.0d) abaixo do mínimo (%.0u)",
                          nivelMedido, (unsigned)nivelMin);
                 queueLogf("Aguardando o nível do rio subir...");
@@ -2208,6 +2214,7 @@ void TaskIOControl(void *pv)
           if (!motorOffEsperado && nivelControleAtivo && nivelMedido < nivelMin) {
             // Pulso seria LIGAR, nível ativado, e nível abaixo do mínimo
             bloqueadoPorNivel = true;
+            bloqueadoPorNivelLastReconcile = true;
             ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda): nível do rio (%.0d) abaixo do mínimo (%.0u)",
                      nivelMedido, (unsigned)nivelMin);
             queueLogf("Aguardando o nível do rio subir...");
@@ -2243,6 +2250,7 @@ void TaskIOControl(void *pv)
         for (; cicloON < 1; cicloON++) {
           // Verificação de nível antes de enviar pulso LIGAR
           if (nivelControleAtivo && nivelMedido < nivelMin) {
+            bloqueadoPorNivelLastReconcile = true;
             ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda ciclo): nível do rio (%.0d) abaixo do mínimo (%.0u)",
                      nivelMedido, (unsigned)nivelMin);
             queueLogf("Aguardando o nível do rio subir...");
