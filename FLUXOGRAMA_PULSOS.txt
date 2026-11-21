@@ -1,0 +1,269 @@
+FLUXOGRAMA DE ACIONAMENTO DOS PULSOS DO MOTOR
+============================================
+
+Referência: src/Main.cpp, TaskIOControl e processPulseController.
+
+Legenda:
+  MOTOR DESLIGADO: entrada IN1 = 1 (motorStatus = true).
+  MOTOR LIGADO:    entrada IN1 = 0 (motorStatus = false).
+  MODO LOCAL:      entrada IN2 = 1 (modoLocal = true).
+  MODO REMOTO:     entrada IN2 = 0; remotoOuAgenda = 0 (MANUAL APP)
+                   ou 1 (AGENDA).
+
+
+1. INICIALIZAÇÃO E RESTAURAÇÃO DO MOTOR
+---------------------------------------
+
+  Início da TaskIOControl
+           |
+           v
+  Aguarda primeira leitura válida do PCF de entrada
+  (leitura tentada a cada 200 ms)
+           |
+           v
+  Lê IN1 (motor) e IN2 (modo)
+           |
+           v
+  Modo LOCAL? ---- SIM ---> Ignora restauração remota
+           |
+          NÃO
+           |
+           v
+  Modo MANUAL APP? -- NÃO --> Modo AGENDA?
+           |                         |
+          SIM                   SIM: segue para a
+           |                    reconciliação da agenda (seção 3)
+           |                    NÃO: registra modo inválido
+           v
+  Compara motor físico com último comando APP salvo na NVS
+           |
+     Estados diferentes?
+       |           |
+      NÃO         SIM
+       |           |
+       |           v
+       |   Deve LIGAR e controle de nível ativo
+       |   com nível abaixo do mínimo?
+       |       |                |
+       |      SIM              NÃO
+       |       |                |
+       |   Bloqueia       Solicita pulso LIGA ou DESLIGA
+       |   pulso LIGA     conforme estado salvo
+       |                        |
+       |                  Aguarda confirmação pela IN1
+       +------------------------+
+                   |
+                   v
+             Segue execução
+
+  A restauração inicial é avaliada uma vez, na primeira leitura válida.
+  Quando bloqueada por nível, a restauração inicial não permanece pendente;
+  o controle automático de nível ainda pode atuar conforme a seção 4.
+
+
+2. CICLO DA TaskIOControl
+------------------------
+
+  Copia comandos, agenda, entradas e ajustes de nível sob mutex
+           |
+           v
+  A cada 200 ms: lê entradas, sensor de nível e atualiza válvula
+           |
+           v
+  Calcula se o controle automático de nível está permitido
+  e cancela pulso de nível em validação se deixou de ser válido
+           |
+           v
+  Processa o controlador de pulsos (seção 5)
+           |
+           v
+  Já houve leitura válida das entradas?
+       |                  |
+      NÃO                SIM
+       |                  |
+  Aguarda e             v
+  reinicia ciclo    Detecta entrada/saída da agenda e
+                    desativação do controle de nível
+                           |
+                           v
+                    Modo LOCAL?
+                     |         |
+                    SIM       NÃO
+                     |         |
+              Aguarda e        +--> MANUAL APP: solicita pulsos
+              reinicia ciclo   |    para comandos LIGAR / DESLIGAR
+                               |              |
+                               |              v
+                               |      Controle de nível (seção 4)
+                               |
+                               +--> AGENDA: executa seção 3
+                                         |
+                                         v
+                          Se permitido e houve leitura nova,
+                          executa controle de nível (seção 4)
+                                         |
+                                         v
+                          Aguarda 50 ms e reinicia ciclo
+
+  O processamento de um pulso já iniciado ocorre antes do teste de modo
+  LOCAL. A troca para LOCAL, por si só, não cancela todos os pulsos.
+
+
+3. MODO AGENDA E RECONCILIAÇÃO
+------------------------------
+
+  Agenda ativa = modo REMOTO e remotoOuAgenda = 1.
+
+  Ao entrar na agenda, ou ao desativar o controle de nível com a agenda
+  já ativa, agendaReconcilePending passa a true.
+  Ao sair da agenda, a pendência de reconciliação é cancelada.
+
+  Reconciliação pendente?
+       |                       |
+      SIM                     NÃO
+       |                       |
+       v                       |
+  Aguarda leitura nova         |
+  com controlador livre        |
+  na leitura e ainda livre,    |
+  sem pulso pendente.          |
+       |                       |
+       +-----------+-----------+
+                   |
+                   v
+  RTC e horário válidos? -- NÃO --> Ignora controle por agenda,
+       |                           aguarda 10 s e tenta novamente
+      SIM
+       |
+       v
+  Calcula estado esperado:
+  dia programado E dentro do intervalo -> motor DESLIGADO
+  caso contrário                       -> motor LIGADO
+  (os limites do intervalo são inclusivos)
+       |
+       v
+  Reconciliação pendente?
+       |
+      SIM --> Estado físico difere do esperado?
+                    |                  |
+                   NÃO                SIM
+                    |                  |
+                    |                  v
+                    |        Se deve LIGAR, nível ativo e abaixo
+                    |        do mínimo: bloqueia pulso LIGA.
+                    |        Caso contrário: solicita pulso
+                    |        para alcançar o estado esperado.
+                    |                  |
+                    +------------------+
+                               |
+                               v
+                    Ajusta cicloON/cicloOFF para o estado
+                    esperado e encerra a reconciliação.
+                    Se requestPulse falhar, mantém pendência.
+
+  Depois, a agenda usa cicloON e cicloOFF para limitar solicitações
+  repetidas: quando espera DESLIGADO solicita DESLIGA; quando espera
+  LIGADO solicita LIGA, bloqueado se nível ativo e abaixo do mínimo.
+  Nesse bloqueio do ciclo normal, cicloON não avança e tenta novamente.
+  Na reconciliação bloqueada, cicloON é ajustado e a pendência é encerrada;
+  o controle de nível da seção 4 pode solicitar LIGA acima do máximo.
+
+  ATENÇÃO: ao desativar o controle de nível, a agenda reconcilia novamente.
+  Se esperar motor ligado e a entrada indicar motor desligado, pode enviar
+  LIGA mesmo com o nível abaixo do mínimo.
+
+
+4. CONTROLE AUTOMÁTICO DE NÍVEL
+------------------------------
+
+  Controle permitido somente quando:
+    - controle de nível está ativo;
+    - entradas do motor foram inicializadas e não está em LOCAL;
+    - MANUAL APP: existe solicitação manual de motor ligado; ou
+      AGENDA: RTC/horário válidos e agenda espera motor ligado;
+    - leitura de nível válida, sem calibração em andamento;
+    - nível mínimo <= nível máximo.
+
+  Com controle permitido e nova leitura de entrada:
+
+     Nível < mínimo E motor ligado? ---- SIM --> solicita DESLIGA
+                |
+               NÃO
+                v
+     Nível > máximo E motor desligado? -- SIM --> solicita LIGA
+                |
+               NÃO
+                v
+     Não solicita pulso de nível
+
+  Os limites são estritos: igualdade com mínimo ou máximo não solicita
+  pulso. O controlador deve estar livre e sem pendência; ultimoPulsoNivel
+  evita repetir o mesmo comando enquanto a condição persistir.
+
+  Durante PULSE_VALIDATING, um pulso de nível é cancelado se o controle
+  deixar de ser permitido ou se a condição de nível/estado deixar de
+  justificar o pulso. Um pulso já em PULSE_ACTIVE não é cancelado por
+  essa verificação.
+
+
+5. CONTROLADOR DE PULSOS
+-----------------------
+
+  requestPulse(tipo, motivo, appCommand)
+           |
+           v
+  Tipo PULSE_NONE? -- SIM --> rejeita
+           |
+          NÃO
+           |
+           v
+  Controlador livre?
+       |                |
+      SIM              NÃO
+       |                |
+       v                v
+  Inicia validação   Há vaga para um pulso pendente?
+                         |                |
+                        SIM              NÃO
+                         |                |
+                  Enfileira pulso    Rejeita solicitação
+                  e retorna sucesso  e registra aviso
+                         |
+                         v
+                  Aguarda controlador livre
+
+  PULSE_VALIDATING
+       |
+       +--> Tempo >= 2500 ms? --> cancela; tenta próximo pendente
+       |
+       +--> Testa barramento I2C com leitura no endereço 0x68.
+       |    Falha ou timeout do mutex I2C --> cancela;
+       |    tenta próximo pendente.
+       |
+       +--> Antes de 2000 ms --> continua validando.
+       |
+       +--> A partir de 2000 ms:
+              - Comando APP: tenta obter mutex dos dados. Se falhar,
+                cancela; se conseguir, verifica se ainda está em
+                MANUAL APP para decidir se salvará o comando na NVS.
+                Mudança de modo, por si só, não cancela esse pulso.
+              - LIGA: coloca bit 0 da saída do PCF em nível baixo.
+              - DESLIGA: coloca bit 1 da saída do PCF em nível baixo.
+              - Falha na escrita: cancela sem salvar comando;
+                tenta próximo pendente.
+              - Escrita bem-sucedida: entra em PULSE_ACTIVE e, se
+                comando APP ainda estiver em MANUAL APP, tenta
+                salvar o estado na NVS.
+       |
+       v
+  PULSE_ACTIVE
+       |
+       +--> Após pelo menos 1000 ms, coloca o bit novamente em nível
+            alto, tenta escrever a saída e registra o fim do pulso.
+            A escrita de liberação não tem seu retorno verificado aqui.
+       |
+       v
+  PULSE_IDLE --> se houver pulso pendente, inicia sua validação.
+
+  A execução não bloqueia a TaskIOControl durante as esperas do pulso;
+  os tempos são verificados ao longo dos ciclos da tarefa.
