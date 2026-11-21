@@ -59,7 +59,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
 
 #ifdef CONFIG_JACUI                    // HW DE TESTE EM BANCADA
   // 1ª Opção: Jacuí
-  uint8_t tempoStart          = 6;     // para dar tempo do wi-fi iniciar no roteador externo
+  uint8_t tempoStart          = 60;     // para dar tempo do wi-fi iniciar no roteador externo
   uint8_t calTemp             = 30;    // Ajuste de calibração da temperatura interna do ESP32 (diminuir sobe no app)
   uint8_t inputNivelSensorPin = 35;    // Leitura analógica no sensor de nível, GPIO36=IN1, GPIO39=IN2, GPIO34=IN3, GPIO35=IN4
   float   setCorrente         = 0.02f; // 1.2 A - Corrente média (A) abaixo da qual os relés 3 e 4 são ligados e válvula é fechada
@@ -104,7 +104,7 @@ Agenda    : comando de acionamento para desligar o motor conforme o intervalo de
 
 #endif
 
-#define BLYNK_FIRMWARE_VERSION "0.2.1"
+#define BLYNK_FIRMWARE_VERSION "0.2.2"
 
 #define USE_ESP32_DEV_MODULE
 #define HEARTBEAT_PIN 23  
@@ -1523,16 +1523,19 @@ while ((xQueueReceive(qLog, &logMsg, 0) == pdTRUE) && (logsProcessados < 10)) {
                  resetReasonName(esp_reset_reason()),
                  (unsigned long)runCopy.counterRST);
 
-        Blynk.virtualWrite(V45, resetMsg);
-        queueLogf("MOTOR STATUS: %s", inputCopy.motorStatus ? "DESLIGADO" : "LIGADO");
-        queueLogf(manualValveCopy ? "Válvula Proporcional em Manual" : "Válvula Proporcional em Automático");
-        queueLogf(Float_Level_CNTRL_Status_ON_OFF ? "Ativado controle de Nível Min/Max" : "Desativado controle de Nível Min/Max");
+        // Log pós reset, envia mensagem ao Blynk e registra no log local
+        Blynk.virtualWrite(V45, resetMsg); // Envia mensagem de motivo e quantidade de resets ao Blynk
+        queueLogf("MOTOR STATUS:  %s", inputCopy.motorStatus ? "DESLIGADO" : "LIGADO");
+
         if (bloqueadoPorNivelLastReconcile) {
-          queueLogf("Aguardando o nível do rio subir...");
+          queueLogf("Aguardando o nível do valo subir...");
           bloqueadoPorNivelLastReconcile = false;
         }
+        queueLogf(Float_Level_CNTRL_Status_ON_OFF ? "Ativado controle de Nível Min/Max" : "Desativado controle de Nível Min/Max");
+        queueLogf(manualValveCopy ? "Válvula Proporcional em Manual" : "Válvula Proporcional em Automático");
+
         ESP_LOGI(TAG_BLYNK, "Log reset enviado: %s", resetMsg);
-        imprimirDiagnosticoSistema();     // depois de enviar o log pós reset, imprime o diagnóstico do sistema
+        imprimirDiagnosticoSistema();     // imprime o diagnóstico do sistema
 
 
         if (xSemaphoreTake(mtxData, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -1845,6 +1848,7 @@ void TaskIOControl(void *pv)
   bool startupMotorAwaitingFeedback = false;
   bool startupMotorTargetOff = true;
   bool agendaAtivaAnterior = false;
+  bool nivelControleAtivoAnterior = false;
   bool agendaReconcilePending = false;
   bool manualMotorSolicitadoLigado = !ultimoComandoMotorOff;
   PulseType ultimoPulsoNivel = PULSE_NONE;
@@ -2016,9 +2020,9 @@ void TaskIOControl(void *pv)
                 // Pulso seria LIGAR, nível ativado, e nível abaixo do mínimo
                 bloqueadoPorNivel = true;
                 bloqueadoPorNivelLastReconcile = true;
-                ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado: nível do rio (%.0d) abaixo do mínimo (%.0u)",
+                ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado: nível do valo (%.0d) abaixo do mínimo (%.0u)",
                          nivelMedido, (unsigned)nivelMin);
-                queueLogf("Aguardando o nível do rio subir...");
+                //queueLogf("Aguardando o nível do valo subir...");
               }
 
               if (!bloqueadoPorNivel) {
@@ -2151,7 +2155,11 @@ void TaskIOControl(void *pv)
     if (agendaAtiva != agendaAtivaAnterior) {
       agendaAtivaAnterior = agendaAtiva;
       agendaReconcilePending = agendaAtiva;
+    } else if (agendaAtiva && nivelControleAtivoAnterior && !nivelControleAtivo) {
+      agendaReconcilePending = true;
+      ESP_LOGI(TAG_IO, "Controle de nivel desativado; reconciliacao da agenda pendente");
     }
+    nivelControleAtivoAnterior = nivelControleAtivo;
 
     // Se está em modo local, não comanda via APP/agenda abaixo
     if (inputCopy.modoLocal) {
@@ -2215,9 +2223,9 @@ void TaskIOControl(void *pv)
             // Pulso seria LIGAR, nível ativado, e nível abaixo do mínimo
             bloqueadoPorNivel = true;
             bloqueadoPorNivelLastReconcile = true;
-            ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda): nível do rio (%.0d) abaixo do mínimo (%.0u)",
+            ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda): nível do valo (%.0d) abaixo do mínimo (%.0u)",
                      nivelMedido, (unsigned)nivelMin);
-            queueLogf("Aguardando o nível do rio subir...");
+            //queueLogf("Aguardando o nível do valo subir...");
           }
 
           if (!bloqueadoPorNivel) {
@@ -2233,7 +2241,7 @@ void TaskIOControl(void *pv)
         cicloOFF = motorOffEsperado ? 1 : 0;
         cicloON = motorOffEsperado ? 0 : 1;
         agendaReconcilePending = false;
-        ESP_LOGI(TAG_IO, "Entrada em AGENDA: esperado=%s atual=%s",
+        ESP_LOGI(TAG_IO, "Reconciliacao AGENDA: esperado=%s  atual=%s",
                  motorOffEsperado ? "DESLIGADO" : "LIGADO",
                  inputCopy.motorStatus ? "DESLIGADO" : "LIGADO");
       }
@@ -2251,9 +2259,9 @@ void TaskIOControl(void *pv)
           // Verificação de nível antes de enviar pulso LIGAR
           if (nivelControleAtivo && nivelMedido < nivelMin) {
             bloqueadoPorNivelLastReconcile = true;
-            ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda ciclo): nível do rio (%.0d) abaixo do mínimo (%.0u)",
+            ESP_LOGW(TAG_IO, "Pulso LIGAR bloqueado (agenda ciclo): nível do valo (%.0d) abaixo do mínimo (%.0u)",
                      nivelMedido, (unsigned)nivelMin);
-            queueLogf("Aguardando o nível do rio subir...");
+            //queueLogf("Aguardando o nível do valo subir...");
             // Não avança cicloON para manter tentando quando nível subir
             break;
           } else {
